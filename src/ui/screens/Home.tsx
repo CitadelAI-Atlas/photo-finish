@@ -23,7 +23,7 @@ export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard
         animate={{ opacity: 1, y: 0 }}
         className="text-center mb-8"
       >
-        <h1 className="text-4xl font-bold tracking-tight text-stone-900">Photo Finish</h1>
+        <h1 className="text-4xl font-bold tracking-tight text-stone-900">Shrug Analytics</h1>
         <p className="text-stone-500 mt-1">At the Track</p>
       </motion.div>
 
