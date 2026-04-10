@@ -1,0 +1,155 @@
+import { motion } from 'framer-motion'
+import type { Race, RaceResult, PayoutResult, RaceRecap, MarketSnapshot } from '@/engine/types'
+
+interface ResultsProps {
+  race: Race
+  result: RaceResult
+  payoutResult: PayoutResult
+  recap: RaceRecap
+  market: MarketSnapshot
+  bankroll: number
+  onNextRace: () => void
+  isLastRace: boolean
+}
+
+const BET_LABELS: Record<string, string> = {
+  win: 'Win', place: 'Place', show: 'Show',
+  quinella: 'Quinella', exacta: 'Exacta', dailyDouble: 'Daily Double',
+}
+
+export function Results({
+  race, result, payoutResult, recap, market, bankroll, onNextRace, isLastRace,
+}: ResultsProps) {
+  return (
+    <div className="min-h-screen bg-amber-50 pb-6">
+      {/* Header */}
+      <div className={`px-4 py-4 ${payoutResult.totalReturn > 0 ? 'bg-green-700' : 'bg-stone-700'} text-white`}>
+        <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
+          <p className="text-xs font-bold uppercase tracking-widest opacity-70">
+            {result.photoFinish ? 'Photo Finish!' : 'Official Results'}
+          </p>
+          <p className="text-2xl font-bold mt-1">
+            {payoutResult.totalReturn > 0 ? `You won $${payoutResult.totalReturn.toFixed(2)}!` : 'Better luck next race'}
+          </p>
+          <p className="text-sm opacity-80 mt-1 font-mono">Bankroll: ${bankroll.toFixed(2)}</p>
+        </motion.div>
+      </div>
+
+      {/* Finish order */}
+      <div className="px-4 pt-4">
+        <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">Finish Order</p>
+        <div className="space-y-1.5">
+          {result.finishOrder.slice(0, 5).map((fp, idx) => {
+            const entry = race.entries.find(e => e.horse.id === fp.horseId)
+            if (!entry) return null
+            const odds = market.odds.find(o => o.horseId === fp.horseId)
+            const tags = recap.factorTags.get(fp.horseId) ?? []
+
+            return (
+              <motion.div
+                key={fp.horseId}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: idx * 0.1 }}
+                className={`flex items-center gap-3 rounded-lg border px-3 py-2 ${
+                  idx === 0 ? 'border-amber-400 bg-amber-50' : 'border-stone-200 bg-white'
+                }`}
+              >
+                <span className={`w-7 text-center font-mono font-bold text-lg ${
+                  idx === 0 ? 'text-amber-600' : 'text-stone-400'
+                }`}>
+                  {fp.position}{fp.deadHeat ? '*' : ''}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-stone-900 truncate">{entry.horse.name}</p>
+                  <div className="flex flex-wrap gap-1 mt-0.5">
+                    {tags.map(tag => (
+                      <span key={tag} className="rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium text-stone-600">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="font-mono text-sm text-stone-600">
+                    {odds ? `${odds.odds >= 10 ? Math.round(odds.odds) : odds.odds.toFixed(1)}-1` : ''}
+                  </p>
+                  {idx > 0 && (
+                    <p className="text-[10px] text-stone-400">{fp.margin}</p>
+                  )}
+                </div>
+              </motion.div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Payouts */}
+      {payoutResult.payouts.length > 0 && (
+        <div className="px-4 pt-4">
+          <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">Your Bets</p>
+          <div className="space-y-1.5">
+            {payoutResult.payouts.map((payout, i) => (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.5 + i * 0.1 }}
+                className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+                  payout.won ? 'border-green-400 bg-green-50' : 'border-stone-200 bg-white'
+                }`}
+              >
+                <span className="text-sm font-bold text-stone-700">{BET_LABELS[payout.betType]}</span>
+                <span className={`font-mono font-bold ${payout.won ? 'text-green-700' : 'text-red-500'}`}>
+                  {payout.won ? `+$${payout.netReturn.toFixed(2)}` : '-$2.00'}
+                </span>
+              </motion.div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Recap */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.8 }}
+        className="px-4 pt-4"
+      >
+        <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">Race Recap</p>
+        <div className="rounded-lg border border-stone-200 bg-white p-3 space-y-2">
+          <p className="text-sm text-stone-700 leading-relaxed">{recap.paceNarrative}</p>
+          {recap.playerHorseStory && (
+            <p className="text-sm text-stone-600 italic leading-relaxed">{recap.playerHorseStory}</p>
+          )}
+        </div>
+
+        {/* Lesson moment */}
+        {recap.lessonMoment && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 1.2 }}
+            className="mt-3 rounded-lg border-2 border-amber-500 bg-amber-50 p-3"
+          >
+            <p className="text-xs font-bold uppercase tracking-widest text-amber-700 mb-1">Lesson</p>
+            <p className="text-sm text-amber-900 leading-relaxed">{recap.lessonMoment}</p>
+          </motion.div>
+        )}
+      </motion.div>
+
+      {/* Next race button */}
+      <div className="px-4 pt-6">
+        <motion.button
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 1.0 }}
+          onClick={onNextRace}
+          className="w-full rounded-xl bg-stone-800 py-4 text-sm font-bold uppercase tracking-wide text-white hover:bg-stone-700 active:bg-stone-900 transition-colors"
+        >
+          {isLastRace ? 'Back to Track Selection' : 'Next Race'}
+        </motion.button>
+      </div>
+    </div>
+  )
+}
