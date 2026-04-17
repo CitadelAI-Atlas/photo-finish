@@ -1,6 +1,18 @@
 import { motion } from 'framer-motion'
 import { TRACKS } from '@/data/tracks'
 import { PROGRESSION_TIERS } from '@/engine/types'
+import type { BetType } from '@/engine/types'
+
+function betLabel(b: BetType): string {
+  switch (b) {
+    case 'win': return 'Win'
+    case 'place': return 'Place'
+    case 'show': return 'Show'
+    case 'exacta': return 'Exacta'
+    case 'quinella': return 'Quinella'
+    case 'dailyDouble': return 'Daily Double'
+  }
+}
 
 interface HomeProps {
   bankroll: number
@@ -65,6 +77,47 @@ export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard
         </div>
       )}
 
+      {/* How to Play */}
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.15 }}
+        className="rounded-xl border-2 border-stone-300 bg-white p-4 mb-6"
+      >
+        <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">How to Play</p>
+        <ol className="text-sm text-stone-700 space-y-1 list-decimal list-inside mb-4">
+          <li>Pick a track, then study the card — form, odds, pace.</li>
+          <li>Tap a horse to open the <em>Bet Slip</em> and stake.</li>
+          <li>Watch the race — odds move live as the pool fills.</li>
+          <li>Winning tickets pay pari-mutuel: expand the breakdown to see the math.</li>
+        </ol>
+
+        <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">Bet Types Unlock with Bankroll</p>
+        <div className="space-y-1">
+          {PROGRESSION_TIERS.map(t => {
+            const unlocked = currentTier >= t.tier
+            const prev = PROGRESSION_TIERS[t.tier - 1]
+            const newBets = prev ? t.betTypes.filter(b => !prev.betTypes.includes(b)) : t.betTypes
+            return (
+              <div
+                key={t.tier}
+                className={`flex items-center justify-between text-xs rounded px-2 py-1.5 ${
+                  unlocked ? 'bg-amber-50 text-stone-800' : 'bg-stone-50 text-stone-400'
+                }`}
+              >
+                <span className="font-mono font-bold w-16 shrink-0">
+                  ${t.bankrollRequired}
+                </span>
+                <span className="flex-1 px-2">{newBets.map(betLabel).join(', ')}</span>
+                <span className="text-[10px] uppercase tracking-wider">
+                  {unlocked ? 'Unlocked' : 'Locked'}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      </motion.div>
+
       {/* Track Selection */}
       <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-3">Pick a Track</p>
       <div className="space-y-2">
@@ -96,6 +149,8 @@ export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard
           </motion.button>
         ))}
       </div>
+
+      {/* Locked bet types tease handled in How to Play above */}
 
       {/* Locked tracks tease */}
       {TRACKS.length > availableTracks.length && (
