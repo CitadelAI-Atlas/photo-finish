@@ -144,7 +144,7 @@ export function useGameFlow() {
         // This DD's leg 1 already ran; is THIS race its leg 2? DD bets
         // are placed on leg 1, so leg 2 is whichever race runs right
         // after leg 1 in this card.
-        const leg1Idx = card.races.findIndex(r => r.id === open.leg1Result.raceId)
+        const leg1Idx: number = card.races.findIndex(r => r.id === open.leg1Result.raceId)
         const leg2Idx = leg1Idx + 1
         if (card.races[leg2Idx]?.id === result.raceId) {
           const ddPayout = resolveDailyDouble(open.bet, open.leg1Result, result, open.leg1Market)
