@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import type { Entry, OddsLine, RaceConditions } from '@/engine/types'
 import { JOCKEYS } from '@/data/jockeys'
 import { surfaceFitBonus, distanceFitBonus } from '@/engine/field'
+import { formatOdds } from '@/engine/odds'
 
 interface HorseDetailProps {
   entry: Entry
@@ -147,8 +148,23 @@ export function HorseDetail({ entry, oddsLine, isFavorite, conditions, fieldSize
               <p className="text-xs text-stone-400 font-mono">
                 {oddsLine ? `${(oddsLine.impliedProb * 100).toFixed(1)}% implied` : ''}
               </p>
+              {oddsLine && (
+                <p className="text-[10px] text-stone-400 font-mono mt-0.5">
+                  {(oddsLine.poolShare * 100).toFixed(1)}% of Win pool
+                </p>
+              )}
             </div>
           </div>
+          {/* Odds are derived, not declared — they're the crowd's opinion
+              expressed as a fraction of the Win pool. Shown here so the
+              player can see why the favorite is the favorite. */}
+          {oddsLine && (
+            <p className="text-[10px] text-stone-400 mt-2 leading-snug">
+              Odds are computed from pool share: more money on this horse → shorter odds.
+              The board snaps the raw number DOWN to a standard bucket (0.20, 0.40 … 5, 6, 8, 10 …),
+              which is why every horse in a race posts at one of a small set of values.
+            </p>
+          )}
         </div>
 
         {/* Speed Rating */}
@@ -275,7 +291,3 @@ function buildAssessment(
   return parts.join(' ')
 }
 
-function formatOdds(odds: number): string {
-  if (odds >= 10) return `${Math.round(odds)}-1`
-  return `${odds.toFixed(1)}-1`
-}

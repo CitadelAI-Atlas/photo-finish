@@ -127,7 +127,7 @@ describe('Calibration — Longshot Win Rate', () => {
 
       totalRaces++
       const winnerId = result.finishOrder[0]?.horseId
-      const winnerOdds = market.odds.find(o => o.horseId === winnerId)?.odds ?? 0
+      const winnerOdds = (winnerId ? market.oddsByHorse.get(winnerId)?.odds : 0) ?? 0
       if (winnerOdds >= 10) {
         longshotWins++
       }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resolveBet, resolveRace } from '@/engine/payout'
+import { resolveBet, resolveRace, resolveDailyDouble, refundBet } from '@/engine/payout'
 import { buildMarketSnapshot } from '@/engine/market'
 import { executeRace } from '@/engine/race'
 import { generateField, generateRaceConditions } from '@/engine/field'
@@ -144,6 +144,99 @@ describe('Payout Resolution', () => {
     expect(resolved.payouts[0]!.won).toBe(true)
     expect(resolved.payouts[1]!.won).toBe(false)
     expect(resolved.totalReturn).toBe(resolved.payouts[0]!.netReturn)
+  })
+})
+
+describe('Payout — explanation and new bet types', () => {
+  it('winning ticket carries a PayoutExplanation', () => {
+    const { result, market } = makeRaceAndResult(42)
+    const winnerId = result.finishOrder[0]!.horseId
+    const bet: Bet = { type: 'win', amount: 2, selections: [winnerId], raceId: result.raceId }
+    const payout = resolveBet(bet, result, market)
+    expect(payout.explanation).not.toBeNull()
+    expect(payout.explanation!.poolLabel).toBe('Win')
+    expect(payout.explanation!.grossPool).toBeGreaterThan(0)
+    expect(payout.explanation!.takeoutRate).toBeGreaterThan(0)
+    expect(payout.explanation!.netPool).toBeLessThan(payout.explanation!.grossPool)
+  })
+
+  it('Place explanation shows bet-back + 2-way split', () => {
+    const { result, market } = makeRaceAndResult(42)
+    const secondId = result.finishOrder[1]!.horseId
+    const bet: Bet = { type: 'place', amount: 2, selections: [secondId], raceId: result.raceId }
+    const payout = resolveBet(bet, result, market)
+    expect(payout.won).toBe(true)
+    expect(payout.explanation!.betBack).toBeGreaterThan(0)
+    expect(payout.explanation!.splitWays).toBeGreaterThanOrEqual(2)
+    expect(payout.explanation!.profitPool).toBe(
+      payout.explanation!.netPool - payout.explanation!.betBack,
+    )
+  })
+
+  it('Show explanation reports 3-way split', () => {
+    const { result, market } = makeRaceAndResult(42)
+    const thirdId = result.finishOrder[2]!.horseId
+    const bet: Bet = { type: 'show', amount: 2, selections: [thirdId], raceId: result.raceId }
+    const payout = resolveBet(bet, result, market)
+    expect(payout.won).toBe(true)
+    expect(payout.explanation!.splitWays).toBeGreaterThanOrEqual(3)
+  })
+
+  it('losing ticket has no explanation', () => {
+    const { result, market } = makeRaceAndResult(42)
+    const loserId = result.finishOrder[result.finishOrder.length - 1]!.horseId
+    const bet: Bet = { type: 'win', amount: 2, selections: [loserId], raceId: result.raceId }
+    const payout = resolveBet(bet, result, market)
+    expect(payout.explanation).toBeNull()
+  })
+
+  it('refundBet returns face value and is marked refunded', () => {
+    const bet: Bet = { type: 'win', amount: 4, selections: ['scratched'], raceId: 'r1' }
+    const payout = refundBet(bet)
+    expect(payout.refunded).toBe(true)
+    expect(payout.won).toBe(false)
+    expect(payout.netReturn).toBe(4)
+  })
+
+  it('Daily Double held open by single-race resolver', () => {
+    const { result, market } = makeRaceAndResult(42)
+    const winner = result.finishOrder[0]!.horseId
+    const bet: Bet = { type: 'dailyDouble', amount: 2, selections: [winner, 'anything'], raceId: result.raceId }
+    const payout = resolveBet(bet, result, market)
+    expect(payout.won).toBe(false)
+    expect(payout.refunded).toBe(false)
+    expect(payout.netReturn).toBe(0)
+  })
+
+  it('Daily Double resolves when both legs hit', () => {
+    // Build two races with a DD pool on leg 1.
+    const seedA = 101, seedB = 202
+    const rngA = new Rng(seedA)
+    const condA = generateRaceConditions(rngA, 'CLM')
+    const entA = generateField(rngA, condA, 8)
+    const raceA: Race = { id: 'ddA', raceNumber: 1, trackCode: 'AQU', conditions: condA, entries: entA }
+
+    const rngB = new Rng(seedB)
+    const condB = generateRaceConditions(rngB, 'CLM')
+    const entB = generateField(rngB, condB, 8)
+    const raceB: Race = { id: 'ddB', raceNumber: 2, trackCode: 'AQU', conditions: condB, entries: entB }
+
+    const leg1Market = buildMarketSnapshot(new Rng(seedA + 7), raceA, raceB)
+    expect(leg1Market.dailyDoublePool).not.toBeNull()
+
+    const leg1Result = executeRace(new Rng(seedA + 11), raceA)
+    const leg2Result = executeRace(new Rng(seedB + 11), raceB)
+    const w1 = leg1Result.finishOrder[0]!.horseId
+    const w2 = leg2Result.finishOrder[0]!.horseId
+
+    const hit: Bet = { type: 'dailyDouble', amount: 2, selections: [w1, w2], raceId: raceA.id }
+    const miss: Bet = { type: 'dailyDouble', amount: 2, selections: [w1, 'not-a-horse'], raceId: raceA.id }
+
+    const hitPayout = resolveDailyDouble(hit, leg1Result, leg2Result, leg1Market)
+    const missPayout = resolveDailyDouble(miss, leg1Result, leg2Result, leg1Market)
+    expect(hitPayout.won).toBe(true)
+    expect(hitPayout.explanation!.poolLabel).toBe('Daily Double')
+    expect(missPayout.won).toBe(false)
   })
 })
 

@@ -1,5 +1,7 @@
 import { motion } from 'framer-motion'
-import type { Race, RaceResult, PayoutResult, RaceRecap, MarketSnapshot } from '@/engine/types'
+import type { Race, RaceResult, PayoutResult, RaceRecap, MarketSnapshot, OddsLine } from '@/engine/types'
+import { formatOdds } from '@/engine/odds'
+import { PayoutBreakdown } from '@/ui/components/PayoutBreakdown'
 
 interface ResultsProps {
   race: Race
@@ -7,6 +9,7 @@ interface ResultsProps {
   payoutResult: PayoutResult
   recap: RaceRecap
   market: MarketSnapshot
+  morningLine: OddsLine[]
   bankroll: number
   onNextRace: () => void
   isLastRace: boolean
@@ -18,18 +21,25 @@ const BET_LABELS: Record<string, string> = {
 }
 
 export function Results({
-  race, result, payoutResult, recap, market, bankroll, onNextRace, isLastRace,
+  race, result, payoutResult, recap, market, morningLine, bankroll, onNextRace, isLastRace,
 }: ResultsProps) {
+  const totalWagered = payoutResult.payouts.reduce((sum, p) => sum + p.amount, 0)
+  const netProfit = payoutResult.totalReturn - totalWagered
+
   return (
     <div className="min-h-screen bg-amber-50 pb-6">
       {/* Header */}
-      <div className={`px-4 py-4 ${payoutResult.totalReturn > 0 ? 'bg-green-700' : 'bg-stone-700'} text-white`}>
+      <div className={`px-4 py-4 ${netProfit > 0 ? 'bg-green-700' : 'bg-stone-700'} text-white`}>
         <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
           <p className="text-xs font-bold uppercase tracking-widest opacity-70">
             {result.photoFinish ? 'Photo Finish!' : 'Official Results'}
           </p>
           <p className="text-2xl font-bold mt-1">
-            {payoutResult.totalReturn > 0 ? `You won $${payoutResult.totalReturn.toFixed(2)}!` : 'Better luck next race'}
+            {netProfit > 0
+              ? `You won $${netProfit.toFixed(2)}!`
+              : netProfit < 0
+                ? `You lost $${Math.abs(netProfit).toFixed(2)}`
+                : 'Even money'}
           </p>
           <p className="text-sm opacity-80 mt-1 font-mono">Bankroll: ${bankroll.toFixed(2)}</p>
         </motion.div>
@@ -42,8 +52,10 @@ export function Results({
           {result.finishOrder.slice(0, 5).map((fp, idx) => {
             const entry = race.entries.find(e => e.horse.id === fp.horseId)
             if (!entry) return null
-            const odds = market.odds.find(o => o.horseId === fp.horseId)
+            const odds = market.oddsByHorse.get(fp.horseId)
+            const ml = morningLine.find(o => o.horseId === fp.horseId)
             const tags = recap.factorTags.get(fp.horseId) ?? []
+            const oddsShifted = ml && odds && Math.abs(ml.odds - odds.odds) >= 0.5
 
             return (
               <motion.div
@@ -71,11 +83,16 @@ export function Results({
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="font-mono text-sm text-stone-600">
-                    {odds ? `${odds.odds >= 10 ? Math.round(odds.odds) : odds.odds.toFixed(1)}-1` : ''}
+                  <p className="font-mono text-sm text-stone-900 font-bold">
+                    {odds ? formatOdds(odds.odds) : ''}
                   </p>
+                  {ml && (
+                    <p className={`text-[9px] font-mono ${oddsShifted ? 'text-amber-600' : 'text-stone-400'}`}>
+                      ML {formatOdds(ml.odds)}
+                    </p>
+                  )}
                   {idx > 0 && (
-                    <p className="text-[10px] text-stone-400">{fp.margin}</p>
+                    <p className="text-[10px] text-stone-400 mt-0.5">{fp.margin}</p>
                   )}
                 </div>
               </motion.div>
@@ -84,27 +101,54 @@ export function Results({
         </div>
       </div>
 
-      {/* Payouts */}
+      {/* Payouts — the teaching spine. Each winning ticket expands into a
+          full pari-mutuel breakdown via PayoutBreakdown. */}
       {payoutResult.payouts.length > 0 && (
         <div className="px-4 pt-4">
           <p className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-2">Your Bets</p>
           <div className="space-y-1.5">
-            {payoutResult.payouts.map((payout, i) => (
-              <motion.div
-                key={i}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.5 + i * 0.1 }}
-                className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
-                  payout.won ? 'border-green-400 bg-green-50' : 'border-stone-200 bg-white'
-                }`}
-              >
-                <span className="text-sm font-bold text-stone-700">{BET_LABELS[payout.betType]}</span>
-                <span className={`font-mono font-bold ${payout.won ? 'text-green-700' : 'text-red-500'}`}>
-                  {payout.won ? `+$${payout.netReturn.toFixed(2)}` : '-$2.00'}
-                </span>
-              </motion.div>
-            ))}
+            {payoutResult.payouts.map((payout, i) => {
+              const borderClass = payout.won
+                ? 'border-green-400 bg-green-50'
+                : payout.refunded
+                  ? 'border-stone-300 bg-stone-50'
+                  : 'border-stone-200 bg-white'
+              return (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.5 + i * 0.1 }}
+                  className={`rounded-lg border px-3 py-2 ${borderClass}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex flex-col">
+                      <span className="text-sm font-bold text-stone-700">{BET_LABELS[payout.betType]}</span>
+                      <span className="text-[10px] text-stone-400 font-mono">${payout.amount.toFixed(2)} bet</span>
+                    </div>
+                    <span className={`font-mono font-bold ${
+                      payout.won
+                        ? 'text-green-700'
+                        : payout.refunded
+                          ? 'text-stone-500'
+                          : 'text-red-500'
+                    }`}>
+                      {payout.won
+                        ? `+$${(payout.netReturn - payout.amount).toFixed(2)}`
+                        : payout.refunded
+                          ? `Refunded $${payout.amount.toFixed(2)}`
+                          : `-$${payout.amount.toFixed(2)}`}
+                    </span>
+                  </div>
+                  {payout.won && <PayoutBreakdown payout={payout} />}
+                  {payout.refunded && (
+                    <p className="text-[10px] text-stone-500 italic mt-1">
+                      One of your selections was scratched — stake returned.
+                    </p>
+                  )}
+                </motion.div>
+              )
+            })}
           </div>
         </div>
       )}

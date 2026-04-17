@@ -30,6 +30,11 @@ export interface GameState {
   biggestWin: number
   longestStreak: number
   currentStreak: number
+
+  // Ephemeral, UI-only: bonus/stipend events queued for toast display.
+  // Not persisted across reloads — these are transient "celebrate this"
+  // beats. The UI layer drains them via consumeNotification.
+  pendingNotifications: { id: string; message: string; tone: 'stipend' | 'bonus' }[]
 }
 
 export interface GameActions {
@@ -63,6 +68,9 @@ export interface GameActions {
   unlockAchievement: (id: string) => void
   hasAchievement: (id: string) => boolean
 
+  // Notifications
+  consumeNotification: (id: string) => void
+
   // Reset
   resetGame: () => void
 }
@@ -85,6 +93,7 @@ const INITIAL_STATE: GameState = {
   biggestWin: 0,
   longestStreak: 0,
   currentStreak: 0,
+  pendingNotifications: [],
 }
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -92,21 +101,39 @@ export const useGameStore = create<GameState & GameActions>()(
     (set, get) => ({
       ...INITIAL_STATE,
 
-      placeBet: (amount: number) => set(s => ({
-        bankroll: s.bankroll - amount,
-        totalWagered: s.totalWagered + amount,
-      })),
+      // Stake must be positive and within bankroll — the UI already gates
+      // this via canAdd, but we re-check here so the store never goes
+      // negative from a bug or race condition in the caller.
+      placeBet: (amount: number) => set(s => {
+        if (!Number.isFinite(amount) || amount <= 0) return {}
+        if (amount > s.bankroll) return {}
+        return {
+          bankroll: s.bankroll - amount,
+          totalWagered: s.totalWagered + amount,
+        }
+      }),
 
-      collectPayout: (amount: number) => set(s => ({
-        bankroll: s.bankroll + amount,
-        totalReturned: s.totalReturned + amount,
-      })),
+      collectPayout: (amount: number) => set(s => {
+        if (!Number.isFinite(amount) || amount < 0) return {}
+        return {
+          bankroll: s.bankroll + amount,
+          totalReturned: s.totalReturned + amount,
+        }
+      }),
 
       checkStipend: () => set(s => {
         if (s.bankroll < STIPEND_THRESHOLD) {
           return {
             bankroll: s.bankroll + STIPEND_AMOUNT,
             stipendsReceived: s.stipendsReceived + 1,
+            pendingNotifications: [
+              ...s.pendingNotifications,
+              {
+                id: `stipend-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                message: `You got a $${STIPEND_AMOUNT} stipend — bankrolls below $${STIPEND_THRESHOLD} are topped up so you can keep learning.`,
+                tone: 'stipend',
+              },
+            ],
           }
         }
         return {}
@@ -153,10 +180,21 @@ export const useGameStore = create<GameState & GameActions>()(
 
       recordBetPlaced: () => set(s => {
         const newBetsPlaced = s.cardBetsPlaced + 1
-        const bonus = newBetsPlaced >= RACES_PER_CARD ? CARD_COMPLETION_BONUS : 0
+        const awardBonus = newBetsPlaced >= RACES_PER_CARD
+        const bonus = awardBonus ? CARD_COMPLETION_BONUS : 0
         return {
           cardBetsPlaced: newBetsPlaced,
           bankroll: s.bankroll + bonus,
+          pendingNotifications: awardBonus
+            ? [
+                ...s.pendingNotifications,
+                {
+                  id: `card-bonus-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  message: `Card complete! +$${CARD_COMPLETION_BONUS} bonus for playing every race.`,
+                  tone: 'bonus',
+                },
+              ]
+            : s.pendingNotifications,
         }
       }),
 
@@ -189,10 +227,20 @@ export const useGameStore = create<GameState & GameActions>()(
 
       hasAchievement: (id: string) => get().achievements.includes(id),
 
+      consumeNotification: (id: string) => set(s => ({
+        pendingNotifications: s.pendingNotifications.filter(n => n.id !== id),
+      })),
+
       resetGame: () => set(INITIAL_STATE),
     }),
     {
       name: 'photo-finish-game',
+      // pendingNotifications is ephemeral UI glue — don't persist it, or a
+      // reload would replay stale toasts from a previous session.
+      partialize: (s) => {
+        const { pendingNotifications: _pn, ...rest } = s
+        return rest
+      },
     }
   )
 )

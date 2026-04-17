@@ -24,11 +24,12 @@ const PHASE_DURATION: Record<RacePhase, number> = {
 
 const PHASES: RacePhase[] = ['tote', 'gate', 'early', 'mid', 'stretch', 'finish']
 
-type CameraMode = 'start' | 'wide' | 'finish'
+type CameraMode = 'start' | 'wide' | 'finish' | 'rail'
 function cameraForPhase(p: RacePhase): CameraMode {
   if (p === 'tote' || p === 'gate' || p === 'early') return 'start'
   if (p === 'mid') return 'wide'
-  return 'finish'
+  if (p === 'stretch') return 'finish'
+  return 'rail'
 }
 
 const SILK_COLORS = [
@@ -343,6 +344,295 @@ function drawLabels(ctx: CanvasRenderingContext2D, horses: HorseState[], geo: Tr
   ctx.restore()
 }
 
+// ── Particles (hoof kicks) ─────────────────────────────────────
+// World-space dirt/turf spray behind each running horse. Purely
+// cosmetic; seeded from Math.random (unlike engine RNG) because the
+// canvas layer is non-deterministic anyway (refresh rate, resize).
+
+interface Particle {
+  x: number; y: number
+  vx: number; vy: number
+  life: number; maxLife: number
+  size: number
+  color: string
+}
+
+function surfaceParticleColor(surface: string): string {
+  if (surface === 'T') return '#4a6b3d'
+  if (surface === 'S') return '#6b6b6b'
+  return '#8a6b4a'
+}
+
+function spawnHoofKick(
+  particles: Particle[],
+  x: number, y: number, angle: number,
+  surface: string,
+) {
+  // angle points forward along the rail; spray goes backward + upward.
+  const back = angle + Math.PI
+  const spread = 0.7
+  for (let i = 0; i < 2; i++) {
+    const theta = back + (Math.random() - 0.5) * spread
+    const speed = 30 + Math.random() * 50
+    const life = 0.35 + Math.random() * 0.3
+    particles.push({
+      x: x + Math.cos(back) * 4,
+      y: y + Math.sin(back) * 4,
+      vx: Math.cos(theta) * speed,
+      vy: Math.sin(theta) * speed - 15 - Math.random() * 25,
+      life,
+      maxLife: life,
+      size: 1 + Math.random() * 1.3,
+      color: surfaceParticleColor(surface),
+    })
+  }
+}
+
+function updateParticles(particles: Particle[], dt: number) {
+  const gravity = 90
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]!
+    p.vy += gravity * dt
+    p.x += p.vx * dt
+    p.y += p.vy * dt
+    p.life -= dt
+    if (p.life <= 0) particles.splice(i, 1)
+  }
+}
+
+function drawParticles(ctx: CanvasRenderingContext2D, particles: Particle[]) {
+  for (const p of particles) {
+    const a = Math.max(0, Math.min(1, p.life / p.maxLife))
+    ctx.globalAlpha = a * 0.85
+    ctx.fillStyle = p.color
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill()
+  }
+  ctx.globalAlpha = 1
+}
+
+// ── Backdrop (screen space, drawn before camera transform) ─────
+// Dusk sky gradient + deterministic star field + grandstand
+// silhouette for wide/rail modes. Screen-space so it doesn't zoom
+// with the track — gives a parallax-ish sense of depth.
+
+function drawBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number, mode: CameraMode) {
+  const sky = ctx.createLinearGradient(0, 0, 0, h)
+  sky.addColorStop(0, '#0d1a33')
+  sky.addColorStop(0.5, '#2a3a5e')
+  sky.addColorStop(0.72, '#c4704a')
+  sky.addColorStop(0.82, '#6a3a24')
+  sky.addColorStop(0.86, '#1c1917')
+  sky.addColorStop(1, '#0f0d0b')
+  ctx.fillStyle = sky
+  ctx.fillRect(0, 0, w, h)
+
+  // Deterministic star field (offsets keep them fixed during play)
+  ctx.fillStyle = 'rgba(255,255,255,0.55)'
+  for (let i = 0; i < 50; i++) {
+    const sx = ((i * 73) % Math.max(1, Math.floor(w)))
+    const sy = ((i * 131) % Math.max(1, Math.floor(h * 0.4)))
+    const sz = (i % 3) * 0.3 + 0.5
+    ctx.fillRect(sx, sy, sz, sz)
+  }
+
+  if (mode === 'wide' || mode === 'rail') {
+    drawGrandstand(ctx, w, h)
+  }
+}
+
+function drawGrandstand(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const horizon = h * 0.72
+  const roofY = h * 0.62
+
+  // Roof peaks silhouette
+  ctx.fillStyle = 'rgba(15,12,10,0.88)'
+  ctx.beginPath()
+  ctx.moveTo(0, horizon)
+  const peaks = 6
+  const segW = w / peaks
+  for (let i = 0; i < peaks; i++) {
+    const x0 = i * segW
+    const x1 = x0 + segW
+    const mid = (x0 + x1) / 2
+    ctx.lineTo(x0, horizon)
+    ctx.lineTo(mid - segW * 0.18, roofY + 4)
+    ctx.lineTo(mid + segW * 0.18, roofY + 4)
+    ctx.lineTo(x1, horizon)
+  }
+  ctx.lineTo(w, h * 0.80)
+  ctx.lineTo(0, h * 0.80)
+  ctx.closePath()
+  ctx.fill()
+
+  // Crowd band (dark with speckled highlights)
+  const crowdTop = horizon
+  const crowdBot = h * 0.80
+  ctx.fillStyle = 'rgba(160,130,100,0.45)'
+  for (let i = 0; i < 180; i++) {
+    const nx = (i * 149) % Math.max(1, Math.floor(w))
+    const ny = crowdTop + ((i * 83) % Math.max(1, Math.floor(crowdBot - crowdTop)))
+    ctx.fillRect(nx, ny, 1, 1)
+  }
+}
+
+// ── Rail-cam side view ─────────────────────────────────────────
+// Cinematic broadcast-style view for the finish phase. Horses drawn
+// in profile, mapped left-to-right by gap to the leader. Screen-space
+// only — no camera transform applies here.
+
+function drawSideView(
+  ctx: CanvasRenderingContext2D,
+  w: number, h: number,
+  horses: HorseState[],
+  surface: string,
+) {
+  drawBackdrop(ctx, w, h, 'rail')
+
+  const trackTop = h * 0.82
+  const trackBot = h * 0.98
+  ctx.fillStyle = surface === 'T' ? '#3d6b4a' : surface === 'S' ? '#4a4a4a' : '#b08968'
+  ctx.fillRect(0, trackTop, w, trackBot - trackTop)
+
+  // Outside rail (bottom of screen, closest to camera)
+  ctx.fillStyle = 'rgba(255,255,255,0.45)'
+  ctx.fillRect(0, trackBot - 2, w, 2)
+  // Inside rail (top of track band, far side)
+  ctx.fillStyle = 'rgba(255,255,255,0.25)'
+  ctx.fillRect(0, trackTop, w, 1.5)
+
+  // Finish wire + checkered pole at ~0.82w
+  const wireX = w * 0.82
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(wireX, h * 0.60)
+  ctx.lineTo(wireX, trackBot)
+  ctx.stroke()
+  for (let i = 0; i < 10; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#fff' : '#000'
+    ctx.fillRect(wireX - 3, h * 0.60 + i * 4, 6, 4)
+  }
+
+  // Horses: map (leaderT - currentT) to horizontal offset from wire.
+  // Inner lane (lane 0) = closest to camera = largest + lowest in frame.
+  const lanes = horses.length
+  const laneSpan = (trackBot - trackTop) - 22
+  const laneStep = laneSpan / Math.max(1, lanes - 1)
+  const leaderT = horses.length > 0 ? Math.max(...horses.map(h => h.currentT)) : 0
+  const tToPx = Math.max(2400, w * 8)
+  const baseScale = Math.min(2.4, Math.max(1.2, w / 380))
+
+  // Outer lanes first so inner lanes overlap on top.
+  const sorted = [...horses].sort((a, b) => b.lane - a.lane)
+  for (const ho of sorted) {
+    const gap = leaderT - ho.currentT
+    const x = wireX - gap * tToPx
+    const y = trackBot - 15 - ho.lane * laneStep
+    const s = baseScale * (1 - ho.lane * 0.04)
+    drawHorseProfile(ctx, x, y, ho.color, ho.isPlayer, ho.gallop, ho.pp, s)
+  }
+}
+
+function drawHorseProfile(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number,
+  color: string, isPlayer: boolean,
+  gallop: number, pp: number, s: number,
+) {
+  ctx.save()
+  ctx.translate(x, y)
+
+  const bob = Math.sin(gallop) * 1.3 * s
+
+  // Tail (behind)
+  ctx.strokeStyle = '#2a1a10'
+  ctx.lineWidth = 2 * s
+  const tailSw = Math.sin(gallop * 0.7) * 3 * s
+  ctx.beginPath()
+  ctx.moveTo(-14 * s, bob - 1 * s)
+  ctx.quadraticCurveTo(-22 * s, -2 * s + tailSw + bob, -25 * s, 3 * s + tailSw + bob)
+  ctx.stroke()
+
+  // Rear legs
+  ctx.strokeStyle = '#3a2518'
+  ctx.lineWidth = 2 * s
+  profileLeg(ctx, -10 * s, 4 * s + bob, Math.sin(gallop + Math.PI) * 14, s)
+  profileLeg(ctx, -7 * s, 4 * s + bob, Math.sin(gallop + Math.PI * 0.5) * 14, s)
+
+  // Body
+  ctx.fillStyle = '#5c3d2e'
+  ctx.beginPath()
+  ctx.ellipse(0, bob, 14 * s, 6 * s, 0, 0, Math.PI * 2)
+  ctx.fill()
+
+  // Front legs
+  profileLeg(ctx, 8 * s, 4 * s + bob, Math.sin(gallop) * 14, s)
+  profileLeg(ctx, 11 * s, 4 * s + bob, Math.sin(gallop + Math.PI * 1.5) * 14, s)
+
+  // Neck
+  ctx.save()
+  ctx.translate(12 * s, -3 * s + bob)
+  ctx.rotate(-0.5)
+  ctx.fillStyle = '#5c3d2e'
+  ctx.beginPath(); ctx.ellipse(0, 0, 7 * s, 3 * s, 0, 0, Math.PI * 2); ctx.fill()
+  ctx.restore()
+
+  // Head
+  ctx.fillStyle = '#5c3d2e'
+  ctx.beginPath()
+  ctx.ellipse(18 * s, -7 * s + bob, 4.2 * s, 2.6 * s, -0.4, 0, Math.PI * 2)
+  ctx.fill()
+  // Ear
+  ctx.beginPath()
+  ctx.moveTo(17 * s, -9 * s + bob)
+  ctx.lineTo(18 * s, -11 * s + bob)
+  ctx.lineTo(19 * s, -9 * s + bob)
+  ctx.closePath()
+  ctx.fill()
+  // Eye
+  ctx.fillStyle = '#111'
+  ctx.beginPath(); ctx.arc(20 * s, -7.2 * s + bob, 0.8 * s, 0, Math.PI * 2); ctx.fill()
+
+  // Jockey silks
+  ctx.fillStyle = color
+  ctx.beginPath()
+  ctx.ellipse(2 * s, -5 * s + bob, 4.8 * s, 3.6 * s, -0.25, 0, Math.PI * 2)
+  ctx.fill()
+  // Jockey head
+  ctx.fillStyle = '#f5deb3'
+  ctx.beginPath(); ctx.arc(5 * s, -9 * s + bob, 2.3 * s, 0, Math.PI * 2); ctx.fill()
+  // Helmet
+  ctx.fillStyle = color
+  ctx.beginPath(); ctx.arc(5 * s, -9.5 * s + bob, 2.5 * s, Math.PI, 0); ctx.fill()
+
+  // PP number on silks
+  ctx.fillStyle = '#fff'
+  ctx.font = `bold ${Math.max(8, 9 * s)}px monospace`
+  ctx.textAlign = 'center'
+  ctx.fillText(String(pp), 2 * s, -3.5 * s + bob)
+
+  // Player ring
+  if (isPlayer) {
+    ctx.strokeStyle = '#fbbf24'
+    ctx.lineWidth = 2.5 * s
+    ctx.beginPath()
+    ctx.ellipse(0, bob, 20 * s, 12 * s, 0, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+
+  ctx.restore()
+}
+
+function profileLeg(ctx: CanvasRenderingContext2D, lx: number, ly: number, deg: number, s: number) {
+  ctx.save()
+  ctx.translate(lx, ly)
+  ctx.rotate((deg * Math.PI) / 180)
+  ctx.beginPath()
+  ctx.moveTo(0, 0); ctx.lineTo(0, 10 * s)
+  ctx.stroke()
+  ctx.restore()
+}
+
 // ── Component ──────────────────────────────────────────────────
 
 export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceViewProps) {
@@ -355,6 +645,7 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
   const lastFrameRef = useRef(performance.now())
   const prevCamRef = useRef<Cam | null>(null)
   const camTransRef = useRef(1)
+  const particlesRef = useRef<Particle[]>([])
 
   const active = race.entries.filter(e => !e.scratched)
 
@@ -448,7 +739,7 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
       // Build geometry from current viewport size
       const geo = buildGeo(w, h)
 
-      // Phase timing
+      // Phase timing — LINEAR for position (smooth speed), eased only for camera
       const elapsed = now - phaseStartRef.current
       const t = Math.min(elapsed / PHASE_DURATION[phase], 1)
       const et = easeInOutCubic(t)
@@ -457,50 +748,73 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
       // Update horses
       const horses = horsesRef.current
       for (const ho of horses) {
-        ho.targetT = Math.min(1, baseProgress(phase, et) + styleOffset(ho.style, phase, et, ho.lane))
-        // Never allow backward movement
-        ho.targetT = Math.max(ho.targetT, ho.currentT)
-        ho.currentT += (ho.targetT - ho.currentT) * Math.min(1, 3.5 * dt)
+        // Position is computed from LINEAR t so speed is constant within each phase
+        // and continuous across phase boundaries (baseProgress + styleOffset are designed this way).
+        ho.targetT = Math.min(1, baseProgress(phase, t) + styleOffset(ho.style, phase, t, ho.lane))
+        ho.targetT = Math.max(ho.targetT, ho.currentT) // never backward
+
+        // Tight, frame-rate-independent lerp toward target.
+        // factor = 1 - exp(-k*dt) gives true exponential smoothing.
+        const k = 12
+        ho.currentT += (ho.targetT - ho.currentT) * (1 - Math.exp(-k * dt))
+
         if (moving) ho.gallop += (8 + ho.lane * 0.5) * dt * Math.PI * 2
       }
 
-      // Camera
       const mode = cameraForPhase(phase)
-      let target: Cam
-      switch (mode) {
-        case 'start': target = camStart(w, h, geo, horses, phase, et); break
-        case 'wide': target = camWide(w, h, geo); break
-        case 'finish': target = camFinish(w, h, geo, horses); break
+      const laneW = geo.tw / (horses.length + 1)
+
+      // Spawn hoof-kick particles for moving horses (top-down views only —
+      // rail cam is a separate projection in screen space).
+      if (moving && mode !== 'rail') {
+        for (const ho of horses) {
+          if (Math.random() < 0.55) {
+            const lo = -geo.tw / 2 + (ho.lane + 1) * laneW
+            const pt = trackPoint(ho.currentT % 1, geo, lo)
+            spawnHoofKick(particlesRef.current, pt.x, pt.y, pt.angle, race.conditions.surface)
+          }
+        }
       }
-      camTransRef.current = Math.min(1, camTransRef.current + dt * 1.2)
-      const cam = prevCamRef.current && camTransRef.current < 1
-        ? lerpCam(prevCamRef.current, target, camTransRef.current)
-        : target
-      prevCamRef.current = cam
+      updateParticles(particlesRef.current, dt)
 
       // ── Draw ──
       ctx.save()
       ctx.clearRect(0, 0, w, h)
-      ctx.fillStyle = '#1c1917'; ctx.fillRect(0, 0, w, h)
 
-      // Apply camera
-      ctx.translate(cam.tx, cam.ty)
-      ctx.scale(cam.s, cam.s)
+      if (mode === 'rail') {
+        drawSideView(ctx, w, h, horses, race.conditions.surface)
+      } else {
+        let target: Cam
+        switch (mode) {
+          case 'start': target = camStart(w, h, geo, horses, phase, et); break
+          case 'wide': target = camWide(w, h, geo); break
+          case 'finish': target = camFinish(w, h, geo, horses); break
+        }
+        camTransRef.current = Math.min(1, camTransRef.current + dt * 1.2)
+        const cam = prevCamRef.current && camTransRef.current < 1
+          ? lerpCam(prevCamRef.current, target, camTransRef.current)
+          : target
+        prevCamRef.current = cam
 
-      drawTrack(ctx, geo, race.conditions.surface)
+        drawBackdrop(ctx, w, h, mode)
 
-      // Horses back-to-front
-      const sorted = [...horses].sort((a, b) => a.currentT - b.currentT)
-      const laneW = geo.tw / (horses.length + 1)
-      const hScale = Math.max(0.5, Math.min(1.4, 1.0 / cam.s * 1.0))
+        ctx.translate(cam.tx, cam.ty)
+        ctx.scale(cam.s, cam.s)
 
-      for (const ho of sorted) {
-        const lo = -geo.tw / 2 + (ho.lane + 1) * laneW
-        const pt = trackPoint(ho.currentT % 1, geo, lo)
-        drawHorse(ctx, pt.x, pt.y, pt.angle + Math.PI / 2, ho.color, ho.isPlayer, ho.gallop, ho.pp, moving, hScale)
+        drawTrack(ctx, geo, race.conditions.surface)
+        drawParticles(ctx, particlesRef.current)
+
+        const sorted = [...horses].sort((a, b) => a.currentT - b.currentT)
+        const hScale = Math.max(0.5, Math.min(1.4, 1.0 / cam.s * 1.0))
+
+        for (const ho of sorted) {
+          const lo = -geo.tw / 2 + (ho.lane + 1) * laneW
+          const pt = trackPoint(ho.currentT % 1, geo, lo)
+          drawHorse(ctx, pt.x, pt.y, pt.angle + Math.PI / 2, ho.color, ho.isPlayer, ho.gallop, ho.pp, moving, hScale)
+        }
+
+        drawLabels(ctx, sorted, geo, laneW, Math.max(0.4, 0.7 / cam.s))
       }
-
-      drawLabels(ctx, sorted, geo, laneW, Math.max(0.4, 0.7 / cam.s))
       ctx.restore()
 
       animRef.current = requestAnimationFrame(loop)
@@ -553,14 +867,17 @@ function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
 }
 
+// Each phase covers a fraction of the track such that average speed is similar.
+// Phase durations: gate=2.2s early=3.8s mid=3.8s stretch=4.5s finish=2.8s
+// Cumulative: gate→0.05, early→0.30, mid→0.55, stretch→0.85, finish→1.0
 function baseProgress(phase: RacePhase, t: number): number {
   switch (phase) {
     case 'tote': return 0
-    case 'gate': return t * 0.03
-    case 'early': return 0.03 + t * 0.22
-    case 'mid': return 0.25 + t * 0.35
-    case 'stretch': return 0.60 + t * 0.37
-    case 'finish': return 0.97 + t * 0.03
+    case 'gate': return t * 0.05            // 0.023/s — short burst out of gate
+    case 'early': return 0.05 + t * 0.25    // 0.066/s
+    case 'mid': return 0.30 + t * 0.25      // 0.066/s
+    case 'stretch': return 0.55 + t * 0.30  // 0.067/s
+    case 'finish': return 0.85 + t * 0.15   // 0.054/s — slight slowdown at wire
   }
 }
 

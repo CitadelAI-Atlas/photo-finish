@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { MarketSnapshot, Race } from '@/engine/types'
+import { formatOdds } from '@/engine/odds'
 
 interface ToteBoardProps {
   race: Race
@@ -48,7 +49,7 @@ export function ToteBoard({ race, snapshots, onComplete }: ToteBoardProps) {
 
       <div className="space-y-1">
         {activeEntries.map(entry => {
-          const oddsLine = current.odds.find(o => o.horseId === entry.horse.id)
+          const oddsLine = current.oddsByHorse.get(entry.horse.id)
           const isFavorite = entry.horse.id === current.favoriteId
           return (
             <motion.div
@@ -80,7 +81,3 @@ export function ToteBoard({ race, snapshots, onComplete }: ToteBoardProps) {
   )
 }
 
-function formatOdds(odds: number): string {
-  if (odds >= 10) return `${Math.round(odds)}-1`
-  return `${odds.toFixed(1)}-1`
-}

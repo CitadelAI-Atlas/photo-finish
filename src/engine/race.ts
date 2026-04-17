@@ -118,18 +118,43 @@ export function executeRace(rng: Rng, race: Race): RaceResult {
     }
   })
 
-  // Check for dead heats (within 0.1 points)
+  // Dead-heat clustering.
+  //
+  // Real racing: a dead heat is called when the photo can't separate two
+  // noses. We model that with a performance threshold — if a trailing
+  // horse's performance is within DH_THRESHOLD of the cluster LEADER,
+  // it's indistinguishable. Crucially, we anchor to the cluster leader
+  // (not the previous horse): if A=100.0, B=99.92, C=99.83, only A+B
+  // tie — C is 0.17 behind the leader, measurably back. A naive pairwise
+  // chain would wrongly rope C into the tie because B-C is tight.
+  //
+  // All horses in a cluster share the cluster's starting position, so a
+  // 3-way dead heat for win produces three "1st place" finishers and the
+  // next horse is 4th (not 2nd). That matters for payouts: the Place pool
+  // pays all three as winners, each at a 1/3 slice.
+  const DH_THRESHOLD = 0.1
   let deadHeat = false
-  for (let i = 0; i < finishOrder.length - 1; i++) {
-    const gap = Math.abs(finishOrder[i]!.performance - finishOrder[i + 1]!.performance)
-    if (gap <= 0.1) {
-      finishOrder[i]!.deadHeat = true
-      finishOrder[i + 1]!.deadHeat = true
-      // Dead heat horses share the same position
-      finishOrder[i + 1]!.position = finishOrder[i]!.position
-      finishOrder[i + 1]!.margin = 'dead heat'
+  let i = 0
+  while (i < finishOrder.length) {
+    const anchor = finishOrder[i]!.performance
+    let j = i + 1
+    while (
+      j < finishOrder.length &&
+      Math.abs(anchor - finishOrder[j]!.performance) <= DH_THRESHOLD
+    ) {
+      j++
+    }
+    const clusterSize = j - i
+    if (clusterSize > 1) {
+      const sharedPosition = finishOrder[i]!.position
+      for (let k = i; k < j; k++) {
+        finishOrder[k]!.deadHeat = true
+        finishOrder[k]!.position = sharedPosition
+        if (k > i) finishOrder[k]!.margin = 'dead heat'
+      }
       deadHeat = true
     }
+    i = j
   }
 
   // Check for photo finish (within 0.5 points between 1st and 2nd)

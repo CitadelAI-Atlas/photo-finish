@@ -1,9 +1,11 @@
 import type { Entry, OddsLine } from '@/engine/types'
 import { JOCKEYS } from '@/data/jockeys'
+import { formatOdds } from '@/engine/odds'
 
 interface HorseRowProps {
   entry: Entry
   oddsLine?: OddsLine
+  morningLineOdds?: OddsLine
   isFavorite: boolean
   isSelected: boolean
   onSelect: () => void
@@ -13,9 +15,13 @@ interface HorseRowProps {
 const STYLE_LABELS = { E: 'Speed', P: 'Stalker', S: 'Closer' } as const
 const STYLE_COLORS = { E: 'text-red-600', P: 'text-blue-600', S: 'text-green-700' } as const
 
-export function HorseRow({ entry, oddsLine, isFavorite, isSelected, onSelect, onInspect }: HorseRowProps) {
+export function HorseRow({ entry, oddsLine, morningLineOdds, isFavorite, isSelected, onSelect, onInspect }: HorseRowProps) {
   const h = entry.horse
   const jockey = JOCKEYS.find(j => j.id === h.jockeyId)
+  // Detect if the live odds shifted from the morning line — that's market action
+  const drift = oddsLine && morningLineOdds ? oddsLine.odds - morningLineOdds.odds : 0
+  const driftDirection: 'down' | 'up' | 'flat' =
+    drift <= -0.5 ? 'down' : drift >= 0.5 ? 'up' : 'flat'
 
   if (entry.scratched) {
     return (
@@ -77,18 +83,24 @@ export function HorseRow({ entry, oddsLine, isFavorite, isSelected, onSelect, on
 
       {/* Odds */}
       <div className="text-right shrink-0">
-        <p className="font-mono font-bold text-lg text-stone-900">
-          {oddsLine ? formatOdds(oddsLine.odds) : '--'}
-        </p>
-        <p className="text-[10px] text-stone-400 font-mono">
-          {oddsLine ? `${(oddsLine.impliedProb * 100).toFixed(0)}%` : ''}
-        </p>
+        <div className="flex items-center justify-end gap-1">
+          <p className="font-mono font-bold text-lg text-stone-900">
+            {oddsLine ? formatOdds(oddsLine.odds) : '--'}
+          </p>
+          {driftDirection === 'down' && (
+            <span className="text-green-600 text-xs leading-none" title="Bet down (live > ML)">▼</span>
+          )}
+          {driftDirection === 'up' && (
+            <span className="text-red-500 text-xs leading-none" title="Drifted up (live < ML)">▲</span>
+          )}
+        </div>
+        {morningLineOdds && (
+          <p className="text-[9px] text-stone-400 font-mono">
+            ML {formatOdds(morningLineOdds.odds)}
+          </p>
+        )}
       </div>
     </div>
   )
 }
 
-function formatOdds(odds: number): string {
-  if (odds >= 10) return `${Math.round(odds)}-1`
-  return `${odds.toFixed(1)}-1`
-}

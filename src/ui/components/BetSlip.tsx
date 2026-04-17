@@ -2,12 +2,25 @@ import { useState } from 'react'
 import type { BetType, Entry } from '@/engine/types'
 import { BET_UNIT } from '@/engine/types'
 
+export interface PendingBet {
+  betType: BetType
+  amount: number
+  primaryName: string
+  primaryPP: number
+  secondaryName?: string
+  secondaryPP?: number
+}
+
 interface BetSlipProps {
   selectedHorse: Entry | null
   secondHorse: Entry | null
   availableBetTypes: BetType[]
   bankroll: number
-  onPlaceBet: (betType: BetType, amount: number) => void
+  pendingBets: PendingBet[]
+  pendingTotal: number
+  onAddBet: (betType: BetType, amount: number) => void
+  onRemoveBet: (index: number) => void
+  onRunRace: () => void
   onSelectSecondHorse: () => void
   needsSecondHorse: boolean
 }
@@ -37,7 +50,11 @@ export function BetSlip({
   secondHorse,
   availableBetTypes,
   bankroll,
-  onPlaceBet,
+  pendingBets,
+  pendingTotal,
+  onAddBet,
+  onRemoveBet,
+  onRunRace,
   onSelectSecondHorse,
   needsSecondHorse,
 }: BetSlipProps) {
@@ -45,11 +62,58 @@ export function BetSlip({
   const [amount, setAmount] = useState(BET_UNIT)
 
   const requiresTwo = betType === 'exacta' || betType === 'quinella'
-  const canPlace = selectedHorse && amount <= bankroll && (!requiresTwo || secondHorse)
+  const remaining = bankroll - pendingTotal
+  // Same-horse exotic is impossible at the track; if the UI ever hands us
+  // one we refuse it here so a bad ticket never reaches the engine.
+  const sameHorseExotic = requiresTwo &&
+    secondHorse?.horse.id === selectedHorse?.horse.id
+  const canAdd = !!selectedHorse
+    && amount > 0
+    && amount <= remaining
+    && (!requiresTwo || (!!secondHorse && !sameHorseExotic))
 
   return (
     <div className="rounded-lg border-2 border-stone-700 bg-stone-800 p-3 space-y-3">
-      <p className="text-xs font-bold uppercase tracking-widest text-stone-400">Bet Slip</p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-bold uppercase tracking-widest text-stone-400">Bet Slip</p>
+        {pendingBets.length > 0 && (
+          <p className="text-[10px] font-mono text-stone-500">
+            ${remaining.toFixed(2)} left
+          </p>
+        )}
+      </div>
+
+      {/* Pending bets list */}
+      {pendingBets.length > 0 && (
+        <div className="space-y-1.5 border-b border-stone-700 pb-3">
+          {pendingBets.map((b, i) => (
+            <div key={i} className="flex items-center gap-2 rounded bg-stone-900 px-2 py-1.5">
+              <div className="flex-1 min-w-0">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-amber-400">
+                  ${b.amount} {BET_LABELS[b.betType]}
+                </p>
+                <p className="text-xs text-stone-300 truncate">
+                  <span className="font-mono text-stone-500">#{b.primaryPP}</span> {b.primaryName}
+                  {b.secondaryName && (
+                    <>
+                      {' '}
+                      <span className="text-stone-500">{b.betType === 'exacta' ? '/' : '&'}</span>{' '}
+                      <span className="font-mono text-stone-500">#{b.secondaryPP}</span> {b.secondaryName}
+                    </>
+                  )}
+                </p>
+              </div>
+              <button
+                onClick={() => onRemoveBet(i)}
+                className="shrink-0 text-stone-500 hover:text-red-400 px-1.5 text-lg leading-none"
+                aria-label="Remove bet"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {selectedHorse ? (
         <div className="rounded bg-stone-700 px-3 py-2">
@@ -101,7 +165,7 @@ export function BetSlip({
 
       {/* Amount selector */}
       <div className="flex gap-1.5">
-        {BET_AMOUNTS.filter(a => a <= bankroll).map(a => (
+        {BET_AMOUNTS.filter(a => a <= remaining).map(a => (
           <button
             key={a}
             onClick={() => setAmount(a)}
@@ -116,29 +180,44 @@ export function BetSlip({
         ))}
       </div>
 
-      {/* Place bet button */}
+      {/* Add bet button */}
       <button
-        disabled={!canPlace}
+        disabled={!canAdd}
         onClick={() => {
-          if (canPlace) {
+          if (canAdd) {
             if (needsSecondHorse && !secondHorse) {
               onSelectSecondHorse()
             } else {
-              onPlaceBet(betType, amount)
+              onAddBet(betType, amount)
             }
           }
         }}
-        className={`w-full rounded-lg py-3 text-sm font-bold uppercase tracking-wide transition-colors ${
-          canPlace
-            ? 'bg-green-600 text-white hover:bg-green-500 active:bg-green-700'
-            : 'bg-stone-700 text-stone-500 cursor-not-allowed'
+        className={`w-full rounded-lg py-2.5 text-sm font-bold uppercase tracking-wide transition-colors ${
+          canAdd
+            ? 'bg-stone-700 text-amber-400 hover:bg-stone-600 active:bg-stone-800 border border-amber-600/50'
+            : 'bg-stone-700 text-stone-500 cursor-not-allowed border border-transparent'
         }`}
       >
         {!selectedHorse
           ? 'Select a horse'
           : requiresTwo && !secondHorse
             ? 'Select second horse'
-            : `Place $${amount} ${BET_LABELS[betType]} Bet`}
+            : `+ Add $${amount} ${BET_LABELS[betType]}`}
+      </button>
+
+      {/* Run race button */}
+      <button
+        disabled={pendingBets.length === 0}
+        onClick={onRunRace}
+        className={`w-full rounded-lg py-3 text-sm font-bold uppercase tracking-wide transition-colors ${
+          pendingBets.length > 0
+            ? 'bg-green-600 text-white hover:bg-green-500 active:bg-green-700'
+            : 'bg-stone-900 text-stone-600 cursor-not-allowed'
+        }`}
+      >
+        {pendingBets.length === 0
+          ? 'Add bets to run race'
+          : `Run Race — $${pendingTotal.toFixed(2)} on ${pendingBets.length} bet${pendingBets.length > 1 ? 's' : ''}`}
       </button>
     </div>
   )

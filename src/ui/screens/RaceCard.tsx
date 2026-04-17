@@ -1,30 +1,36 @@
 import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import type { Race, MarketSnapshot, BetType, Entry } from '@/engine/types'
+import type { Race, MarketSnapshot, BetType, Entry, OddsLine } from '@/engine/types'
 import { HorseRow } from '@/ui/components/HorseRow'
 import { HorseDetail } from '@/ui/components/HorseDetail'
-import { BetSlip } from '@/ui/components/BetSlip'
+import { BetSlip, type PendingBet } from '@/ui/components/BetSlip'
+
+interface PendingBetWithSelections extends PendingBet {
+  selections: string[]
+}
 
 interface RaceCardProps {
   race: Race
   market: MarketSnapshot
+  morningLine: OddsLine[]
   raceIndex: number
   totalRaces: number
   bankroll: number
   availableBetTypes: BetType[]
-  onPlaceBet: (betType: BetType, amount: number, selections: string[]) => void
+  onRunRace: (bets: { betType: BetType; amount: number; selections: string[] }[]) => void
 }
 
 const SURFACE_LABELS = { D: 'Dirt', T: 'Turf', A: 'Synthetic' } as const
 const CLASS_LABELS = { MCL: 'Maiden Claiming', CLM: 'Claiming', ALW: 'Allowance', STK: 'Stakes' } as const
 
 export function RaceCard({
-  race, market, raceIndex, totalRaces, bankroll, availableBetTypes, onPlaceBet,
+  race, market, morningLine, raceIndex, totalRaces, bankroll, availableBetTypes, onRunRace,
 }: RaceCardProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [secondId, setSecondId] = useState<string | null>(null)
   const [selectingSecond, setSelectingSecond] = useState(false)
   const [inspectingId, setInspectingId] = useState<string | null>(null)
+  const [pendingBets, setPendingBets] = useState<PendingBetWithSelections[]>([])
 
   const cond = race.conditions
   const activeEntries = race.entries.filter(e => !e.scratched)
@@ -34,7 +40,11 @@ export function RaceCard({
   const secondEntry = activeEntries.find(e => e.horse.id === secondId) ?? null
   const inspectingEntry = race.entries.find(e => e.horse.id === inspectingId) ?? null
 
+  const pendingTotal = pendingBets.reduce((sum, b) => sum + b.amount, 0)
+
   const handleSelect = useCallback((entry: Entry) => {
+    // A scratched horse cannot be selected for a bet — it won't run.
+    if (entry.scratched) return
     if (selectingSecond) {
       if (entry.horse.id !== selectedId) {
         setSecondId(entry.horse.id)
@@ -46,13 +56,38 @@ export function RaceCard({
     }
   }, [selectingSecond, selectedId])
 
-  const handlePlaceBet = useCallback((betType: BetType, amount: number) => {
-    if (!selectedId) return
-    const selections = betType === 'exacta' || betType === 'quinella'
-      ? [selectedId, secondId!]
-      : [selectedId]
-    onPlaceBet(betType, amount, selections)
-  }, [selectedId, secondId, onPlaceBet])
+  const handleAddBet = useCallback((betType: BetType, amount: number) => {
+    if (!selectedEntry) return
+    const isExotic = betType === 'exacta' || betType === 'quinella'
+    if (isExotic && !secondEntry) return
+
+    const selections = isExotic ? [selectedEntry.horse.id, secondEntry!.horse.id] : [selectedEntry.horse.id]
+    const newBet: PendingBetWithSelections = {
+      betType,
+      amount,
+      selections,
+      primaryName: selectedEntry.horse.name,
+      primaryPP: selectedEntry.postPosition,
+      ...(isExotic && secondEntry ? {
+        secondaryName: secondEntry.horse.name,
+        secondaryPP: secondEntry.postPosition,
+      } : {}),
+    }
+    setPendingBets(prev => [...prev, newBet])
+    // Clear selection so user can pick a different horse for the next bet
+    setSelectedId(null)
+    setSecondId(null)
+    setSelectingSecond(false)
+  }, [selectedEntry, secondEntry])
+
+  const handleRemoveBet = useCallback((index: number) => {
+    setPendingBets(prev => prev.filter((_, i) => i !== index))
+  }, [])
+
+  const handleRunRace = useCallback(() => {
+    if (pendingBets.length === 0) return
+    onRunRace(pendingBets.map(b => ({ betType: b.betType, amount: b.amount, selections: b.selections })))
+  }, [pendingBets, onRunRace])
 
   return (
     <div className="min-h-screen bg-amber-50 pb-4">
@@ -73,6 +108,22 @@ export function RaceCard({
           <span>{cond.condition}</span>
           <span>{fieldSize} runners</span>
         </div>
+        {/* Pool sizes — demystifies where your payoff comes from. Every
+            dollar on a winning ticket is drawn from these pools after
+            takeout; exotic pools are the smallest and thus swing the
+            hardest on a single ticket. */}
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-[10px] font-mono text-stone-500">
+          <span>Win ${(market.winPool.totalPool / 1000).toFixed(1)}K</span>
+          <span>Pl ${(market.placePool.totalPool / 1000).toFixed(1)}K</span>
+          <span>Sh ${(market.showPool.totalPool / 1000).toFixed(1)}K</span>
+          <span>Ex ${(market.exactaPool.totalPool / 1000).toFixed(1)}K</span>
+          {market.quinellaPool.totalPool > 0 && (
+            <span>Qn ${(market.quinellaPool.totalPool / 1000).toFixed(1)}K</span>
+          )}
+          {market.dailyDoublePool && market.dailyDoublePool.totalPool > 0 && (
+            <span>DD ${(market.dailyDoublePool.totalPool / 1000).toFixed(1)}K</span>
+          )}
+        </div>
       </div>
 
       {selectingSecond && (
@@ -88,7 +139,8 @@ export function RaceCard({
       {/* Field */}
       <div className="px-4 pt-3 space-y-2">
         {race.entries.map(entry => {
-          const oddsLine = market.odds.find(o => o.horseId === entry.horse.id)
+          const oddsLine = market.oddsByHorse.get(entry.horse.id)
+          const mlOdds = morningLine.find(o => o.horseId === entry.horse.id)
           const isFavorite = entry.horse.id === market.favoriteId
           const isSelected = entry.horse.id === selectedId || entry.horse.id === secondId
 
@@ -102,6 +154,7 @@ export function RaceCard({
               <HorseRow
                 entry={entry}
                 oddsLine={oddsLine}
+                morningLineOdds={mlOdds}
                 isFavorite={isFavorite}
                 isSelected={isSelected}
                 onSelect={() => handleSelect(entry)}
@@ -119,7 +172,11 @@ export function RaceCard({
           secondHorse={secondEntry}
           availableBetTypes={availableBetTypes}
           bankroll={bankroll}
-          onPlaceBet={handlePlaceBet}
+          pendingBets={pendingBets}
+          pendingTotal={pendingTotal}
+          onAddBet={handleAddBet}
+          onRemoveBet={handleRemoveBet}
+          onRunRace={handleRunRace}
           onSelectSecondHorse={() => setSelectingSecond(true)}
           needsSecondHorse={selectingSecond}
         />
@@ -130,7 +187,7 @@ export function RaceCard({
         {inspectingEntry && !inspectingEntry.scratched && (
           <HorseDetail
             entry={inspectingEntry}
-            oddsLine={market.odds.find(o => o.horseId === inspectingId)}
+            oddsLine={inspectingId ? market.oddsByHorse.get(inspectingId) : undefined}
             isFavorite={inspectingId === market.favoriteId}
             conditions={cond}
             fieldSize={fieldSize}

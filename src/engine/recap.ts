@@ -138,7 +138,7 @@ export function detectLessonMoment(
 
   const playerStyle = getRunningStyle(race, playerHorseId)
   const winnerId = result.finishOrder[0]?.horseId ?? ''
-  const winnerOdds = market.odds.find(o => o.horseId === winnerId)?.odds ?? 0
+  const winnerOdds = market.oddsByHorse.get(winnerId)?.odds ?? 0
 
   // Pace kills speed
   if (

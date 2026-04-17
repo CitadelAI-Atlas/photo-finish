@@ -103,23 +103,43 @@ export interface RaceCard {
 
 export type PaceScenario = 'hot' | 'honest' | 'slow'
 
-// ── Market / Odds ──────────────────────────────────────────────
+// ── Market / Pools ─────────────────────────────────────────────
+//
+// Pari-mutuel racing has SEPARATE pools for each bet type. Money bet on
+// exacta does not affect win payouts, and vice-versa. Every pool stands
+// on its own: takeout comes out, the rest is split among the winning
+// tickets weighted by stake.
+//
+// Pool bucket keys:
+//   Win/Place/Show : horseId
+//   Exacta         : `${firstId}|${secondId}` (ordered)
+//   Quinella       : `${idA}|${idB}` where idA < idB lexicographically
+//   Daily Double   : `${leg1Id}|${leg2Id}`
 
-export interface PoolState {
-  totalPool: number
-  horsePool: Map<string, number>  // horseId → $ bet on that horse
+export interface BetPool {
+  totalPool: number                   // gross $ in the pool
+  buckets: Map<string, number>        // key → $ bet on that outcome
 }
 
 export interface OddsLine {
   horseId: string
   odds: number        // to-1 format (e.g. 4.0 = 4-1)
   impliedProb: number // 1 / (odds + 1)
-  poolShare: number   // fraction of pool
+  poolShare: number   // fraction of WIN pool
 }
 
 export interface MarketSnapshot {
-  pool: PoolState
+  // Separate pools — each is its own pari-mutuel universe
+  winPool: BetPool
+  placePool: BetPool
+  showPool: BetPool
+  exactaPool: BetPool
+  quinellaPool: BetPool
+  dailyDoublePool: BetPool | null     // only present on leg 1 of a DD
+
+  // Derived display from Win pool (odds shown on tote board)
   odds: OddsLine[]
+  oddsByHorse: Map<string, OddsLine>  // O(1) lookup for hot paths
   favoriteId: string
 }
 
@@ -147,18 +167,43 @@ export interface RaceResult {
 
 export type BetType = 'win' | 'place' | 'show' | 'exacta' | 'quinella' | 'dailyDouble'
 
+export type BetStatus = 'open' | 'resolved' | 'refunded'
+
 export interface Bet {
   type: BetType
   amount: number
-  selections: string[]  // horseId(s) — 1 for W/P/S, 2 for exacta/quinella
-  raceId: string
+  selections: string[]  // horseId(s) — 1 for W/P/S, 2 for exacta/quinella, 2 for DD (leg1, leg2)
+  raceId: string        // for DD, this is leg 1's raceId
+  status?: BetStatus    // optional so legacy callers still work; defaults to 'open'
+}
+
+// Attached to every Payout so the UI can explain HOW the number was reached.
+// This is the teaching spine of the game — every payout becomes a little lesson.
+export interface PayoutExplanation {
+  poolLabel: string            // "Win", "Place", "Show", "Exacta", ...
+  grossPool: number            // $ in this pool before takeout
+  takeoutRate: number          // e.g. 0.16
+  takeoutAmount: number        // grossPool * takeoutRate
+  netPool: number              // grossPool - takeoutAmount
+  betBack: number              // $ returned to winners first (Place/Show); 0 for Win
+  profitPool: number           // netPool - betBack
+  splitWays: number            // 1 Win, 2 Place, 3 Show, 1 exotic
+  poolOnSelection: number      // $ bet on the winning selection in THIS pool
+  rawPayoutPerDollar: number   // before breakage rounding
+  payoutPerDollar: number      // after dime breakage (per $1)
+  breakagePerDollar: number    // raw - final, per $1 — the "hidden" house keep
+  minPayoutApplied: boolean    // true if we floored at $2.10/$2
+  deadHeatHalved: boolean      // true if split due to a tie for the paying position
 }
 
 export interface Payout {
   betType: BetType
-  displayPayout: number  // return on $2 bet
+  amount: number         // amount wagered
+  displayPayout: number  // return on the standard $2 bet
   won: boolean
-  netReturn: number      // actual $ returned to player (0 if lost)
+  netReturn: number      // actual $ returned to player (0 if lost, amount if refunded)
+  refunded: boolean      // scratched selection → stake returned, not counted as loss
+  explanation: PayoutExplanation | null  // null for refunds / losses
 }
 
 export interface PayoutResult {
@@ -196,13 +241,49 @@ export const PROGRESSION_TIERS: ProgressionTier[] = [
 ]
 
 // ── Constants ──────────────────────────────────────────────────
+//
+// Takeout rates vary by bet type and jurisdiction. These are plausible
+// mid-range US values. Straight pools (W/P/S) are cheapest to play;
+// exotics cost more because the tracks/associations need bigger slices
+// of smaller pools to operate them.
 
-export const TAKEOUT_WIN = 0.18
-export const TAKEOUT_EXOTIC = 0.22
-export const MIN_PAYOUT_PER_DOLLAR = 1.05  // $2.10 on a $2 bet
+export const TAKEOUT_WIN = 0.16
+export const TAKEOUT_PLACE = 0.16
+export const TAKEOUT_SHOW = 0.16
+export const TAKEOUT_EXACTA = 0.20
+export const TAKEOUT_QUINELLA = 0.20
+export const TAKEOUT_DAILYDOUBLE = 0.20
+
+// Minimum payout floor, enshrined in US racing: a winning $2 ticket
+// must return at least $2.10 (a nickel profit per dollar). Comes from
+// state rules protecting bettors on odds-on favorites.
+export const MIN_PAYOUT_PER_DOLLAR = 1.05
+
+// Breakage: real tote boards round the per-$1 payout DOWN to the next
+// dime. A "true" $3.47/$1 payout is shown as $3.40. Those lost pennies
+// are a second, usually-invisible source of house revenue. We model it
+// explicitly so the UI can reveal it.
+export const BREAKAGE_INCREMENT = 0.10
+
+// The unit stake US tracks quote payouts against. Every display value
+// is "pays $X for a $2 ticket." Bigger bets scale proportionally.
+export const BET_UNIT = 2
+
+// Relative pool sizes, expressed as fractions of a standard "crowd".
+// Real tracks see Win pools biggest, then Place/Show, then exotics
+// (Exacta is often the liveliest exotic). Used to size each pool's
+// simulated crowd.
+export const POOL_BETTOR_FRACTIONS: Record<BetType, number> = {
+  win: 1.00,
+  place: 0.55,
+  show: 0.35,
+  exacta: 0.35,
+  quinella: 0.10,
+  dailyDouble: 0.15,
+}
+
 export const STIPEND_THRESHOLD = 10
 export const STIPEND_AMOUNT = 20
 export const CARD_COMPLETION_BONUS = 5
 export const RACES_PER_CARD = 6
 export const SIMULATED_BETTORS = 1000
-export const BET_UNIT = 2

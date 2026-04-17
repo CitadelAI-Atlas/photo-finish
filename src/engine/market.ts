@@ -1,12 +1,42 @@
 import type {
-  Entry, Race, PoolState, OddsLine, MarketSnapshot,
+  Entry, Race, BetPool, OddsLine, MarketSnapshot, BetType,
 } from './types'
-import { TAKEOUT_WIN, SIMULATED_BETTORS } from './types'
+import {
+  TAKEOUT_WIN, SIMULATED_BETTORS, POOL_BETTOR_FRACTIONS, BET_UNIT,
+} from './types'
 import { JOCKEYS, JOCKEY_BONUS } from '@/data/jockeys'
 import { surfaceFitBonus, distanceFitBonus } from './field'
 import type { Rng } from './rng'
 
-// ── Simulated Crowd Betting ────────────────────────────────────
+// ── How the "crowd" decides ────────────────────────────────────
+//
+// We model the betting public as a mix of two types of bettor:
+//
+//  1. Handicappers (majority) — form an opinion of each horse's true
+//     strength (PSR + jockey + surface/distance fit) with individual
+//     noise, then back their top pick. The *average* of many noisy
+//     handicappers approximates the truth — this is the "wisdom of
+//     the crowd" that makes favorites win ~33% of the time.
+//
+//  2. Recreational bettors (minority) — pick flashy names, lucky
+//     numbers, silks they like. Modeled as a uniform random pick from
+//     the field. This is the engine of the FAVORITE–LONGSHOT BIAS:
+//     recreational dollars land disproportionately on longshots,
+//     overbetting them relative to true probability (so their payouts
+//     are worse than they "should" be; favorites are slightly underbet
+//     and thus slightly overlay).
+//
+// Exotic pools (Exacta/Quinella/Daily Double) attract proportionally
+// more recreational action — those are the "dreamer" pools.
+
+const RECREATIONAL_FRACTION: Record<BetType, number> = {
+  win: 0.15,
+  place: 0.12,   // place bettors lean conservative → more handicapped
+  show: 0.10,
+  exacta: 0.28,  // exotics attract chasers of big payouts
+  quinella: 0.28,
+  dailyDouble: 0.25,
+}
 
 function getJockeyBonus(jockeyId: string): number {
   const jockey = JOCKEYS.find(j => j.id === jockeyId)
@@ -14,133 +44,272 @@ function getJockeyBonus(jockeyId: string): number {
   return JOCKEY_BONUS[jockey.tier] ?? 0
 }
 
-function estimateHorseStrength(entry: Entry, race: Race, rng: Rng): number {
+function estimateHorseStrength(entry: Entry, race: Race, rng: Rng, noiseSigma = 12): number {
   const h = entry.horse
   const cond = race.conditions
-
-  const base = h.psr
-  const jockey = getJockeyBonus(h.jockeyId)
-  const surface = surfaceFitBonus(h, cond.surface)
-  const distance = distanceFitBonus(h, cond.distanceCategory)
-  const noise = rng.normal(0, 12) // crowd noise — makes odds imperfect
-
-  return base + jockey + surface + distance + noise
+  return h.psr
+    + getJockeyBonus(h.jockeyId)
+    + surfaceFitBonus(h, cond.surface)
+    + distanceFitBonus(h, cond.distanceCategory)
+    + rng.normal(0, noiseSigma)
 }
 
-export function simulatePool(rng: Rng, race: Race): PoolState {
-  const activeEntries = race.entries.filter(e => !e.scratched)
-  const horsePool = new Map<string, number>()
+// Pick one horse for one bettor — either handicap-driven or random.
+function pickOne(rng: Rng, entries: Entry[], race: Race, recFrac: number, noiseSigma = 12): Entry {
+  if (rng.next() < recFrac) return rng.pick(entries)
 
-  // Initialize pools
-  for (const entry of activeEntries) {
-    horsePool.set(entry.horse.id, 0)
+  let best = entries[0]!
+  let bestEst = -Infinity
+  for (const entry of entries) {
+    const est = estimateHorseStrength(entry, race, rng, noiseSigma)
+    if (est > bestEst) { bestEst = est; best = entry }
   }
+  return best
+}
 
-  // Each virtual bettor picks their top horse
-  for (let b = 0; b < SIMULATED_BETTORS; b++) {
-    let bestId = activeEntries[0]!.horse.id
-    let bestEstimate = -Infinity
-
-    for (const entry of activeEntries) {
-      const est = estimateHorseStrength(entry, race, rng)
-      if (est > bestEstimate) {
-        bestEstimate = est
-        bestId = entry.horse.id
-      }
+// Pick top-N by handicapped estimate, or random N for recreational.
+function pickTopN(rng: Rng, entries: Entry[], race: Race, n: number, recFrac: number): Entry[] {
+  if (rng.next() < recFrac) {
+    const copy = [...entries]
+    const picks: Entry[] = []
+    for (let i = 0; i < n && copy.length > 0; i++) {
+      const idx = Math.floor(rng.next() * copy.length)
+      picks.push(copy.splice(idx, 1)[0]!)
     }
-
-    horsePool.set(bestId, (horsePool.get(bestId) ?? 0) + 2) // $2 per bettor
+    return picks
   }
-
-  const totalPool = Array.from(horsePool.values()).reduce((a, b) => a + b, 0)
-  return { totalPool, horsePool }
+  const scored = entries.map(e => ({ entry: e, score: estimateHorseStrength(e, race, rng) }))
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, n).map(s => s.entry)
 }
 
-export function calculateOdds(pool: PoolState, takeout: number = TAKEOUT_WIN): OddsLine[] {
+function numBettors(betType: BetType): number {
+  return Math.floor(SIMULATED_BETTORS * POOL_BETTOR_FRACTIONS[betType])
+}
+
+// ── Simulate each pool ─────────────────────────────────────────
+
+function simulateWinPool(rng: Rng, race: Race, active: Entry[]): BetPool {
+  const buckets = new Map<string, number>()
+  for (const e of active) buckets.set(e.horse.id, 0)
+  const n = numBettors('win')
+  for (let b = 0; b < n; b++) {
+    const pick = pickOne(rng, active, race, RECREATIONAL_FRACTION.win)
+    buckets.set(pick.horse.id, (buckets.get(pick.horse.id) ?? 0) + BET_UNIT)
+  }
+  return { totalPool: n * BET_UNIT, buckets }
+}
+
+function simulatePlacePool(rng: Rng, race: Race, active: Entry[]): BetPool {
+  const buckets = new Map<string, number>()
+  for (const e of active) buckets.set(e.horse.id, 0)
+  const n = numBettors('place')
+  for (let b = 0; b < n; b++) {
+    const pick = pickOne(rng, active, race, RECREATIONAL_FRACTION.place)
+    buckets.set(pick.horse.id, (buckets.get(pick.horse.id) ?? 0) + BET_UNIT)
+  }
+  return { totalPool: n * BET_UNIT, buckets }
+}
+
+function simulateShowPool(rng: Rng, race: Race, active: Entry[]): BetPool {
+  const buckets = new Map<string, number>()
+  for (const e of active) buckets.set(e.horse.id, 0)
+  const n = numBettors('show')
+  for (let b = 0; b < n; b++) {
+    const pick = pickOne(rng, active, race, RECREATIONAL_FRACTION.show)
+    buckets.set(pick.horse.id, (buckets.get(pick.horse.id) ?? 0) + BET_UNIT)
+  }
+  return { totalPool: n * BET_UNIT, buckets }
+}
+
+function simulateExactaPool(rng: Rng, race: Race, active: Entry[]): BetPool {
+  const buckets = new Map<string, number>()
+  const n = numBettors('exacta')
+  for (let b = 0; b < n; b++) {
+    const [first, second] = pickTopN(rng, active, race, 2, RECREATIONAL_FRACTION.exacta)
+    if (!first || !second) continue
+    const key = `${first.horse.id}|${second.horse.id}`
+    buckets.set(key, (buckets.get(key) ?? 0) + BET_UNIT)
+  }
+  return { totalPool: n * BET_UNIT, buckets }
+}
+
+function simulateQuinellaPool(rng: Rng, race: Race, active: Entry[]): BetPool {
+  const buckets = new Map<string, number>()
+  const n = numBettors('quinella')
+  for (let b = 0; b < n; b++) {
+    const [a, bEntry] = pickTopN(rng, active, race, 2, RECREATIONAL_FRACTION.quinella)
+    if (!a || !bEntry) continue
+    const key = quinellaKey(a.horse.id, bEntry.horse.id)
+    buckets.set(key, (buckets.get(key) ?? 0) + BET_UNIT)
+  }
+  return { totalPool: n * BET_UNIT, buckets }
+}
+
+function simulateDailyDoublePool(rng: Rng, leg1: Race, leg2: Race, active1: Entry[], active2: Entry[]): BetPool {
+  // Each DD bettor independently picks one horse per leg. Their ticket
+  // is locked as the pair; it wins only if BOTH horses win their leg.
+  const buckets = new Map<string, number>()
+  const n = numBettors('dailyDouble')
+  for (let b = 0; b < n; b++) {
+    const a = pickOne(rng, active1, leg1, RECREATIONAL_FRACTION.dailyDouble)
+    const c = pickOne(rng, active2, leg2, RECREATIONAL_FRACTION.dailyDouble)
+    const key = `${a.horse.id}|${c.horse.id}`
+    buckets.set(key, (buckets.get(key) ?? 0) + BET_UNIT)
+  }
+  return { totalPool: n * BET_UNIT, buckets }
+}
+
+// Canonical ordering so (A,B) and (B,A) become the same ticket.
+export function quinellaKey(idA: string, idB: string): string {
+  return idA < idB ? `${idA}|${idB}` : `${idB}|${idA}`
+}
+
+// ── Tote board display ─────────────────────────────────────────
+// Real boards never show arbitrary decimals — they round odds down to
+// specific "buckets". Rounding DOWN is pro-bettor on the odds side
+// (your horse pays at least the displayed odds, usually a hair more
+// before breakage eats it).
+
+const TOTE_BUCKETS = [
+  0.20, 0.40, 0.50, 0.60, 0.80,
+  1.0, 1.2, 1.4, 1.5, 1.6, 1.8,
+  2.0, 2.5,
+  3.0, 3.5,
+  4.0, 4.5,
+  5.0, 6.0, 7.0, 8.0, 9.0,
+  10, 12, 15, 20, 30, 50, 99,
+] as const
+
+function snapToBucket(rawOdds: number): number {
+  if (rawOdds <= TOTE_BUCKETS[0]!) return TOTE_BUCKETS[0]!
+  if (rawOdds >= 99) return 99
+  for (let i = TOTE_BUCKETS.length - 1; i >= 0; i--) {
+    if (TOTE_BUCKETS[i]! <= rawOdds) return TOTE_BUCKETS[i]!
+  }
+  return TOTE_BUCKETS[0]!
+}
+
+// Derive tote-board odds from the Win pool. This is what bettors see;
+// it is NOT used to compute exotic payouts (those have their own pool).
+export function calculateOdds(pool: BetPool, takeout: number = TAKEOUT_WIN): {
+  odds: OddsLine[]
+  byHorse: Map<string, OddsLine>
+  favoriteId: string
+} {
   const odds: OddsLine[] = []
-
-  for (const [horseId, amount] of pool.horsePool) {
-    const poolShare = amount / pool.totalPool
-    const rawOdds = poolShare > 0
-      ? (1 - takeout) / poolShare - 1
-      : 99 // nobody bet on this horse
-
-    // Round down to nearest 0.1 (dime), minimum 0.1
-    const displayOdds = Math.max(0.1, Math.floor(rawOdds * 10) / 10)
+  for (const [horseId, amount] of pool.buckets) {
+    const poolShare = pool.totalPool > 0 ? amount / pool.totalPool : 0
+    // Fair odds would be (1/poolShare - 1). Takeout skims the top
+    // of the pool first, so we shrink the numerator before dividing.
+    const rawOdds = poolShare > 0 ? (1 - takeout) / poolShare - 1 : 99
+    const displayOdds = snapToBucket(rawOdds)
     const impliedProb = 1 / (displayOdds + 1)
-
     odds.push({ horseId, odds: displayOdds, impliedProb, poolShare })
   }
-
-  // Sort by odds ascending (favorite first)
   odds.sort((a, b) => a.odds - b.odds)
-  return odds
-}
-
-export function buildMarketSnapshot(rng: Rng, race: Race): MarketSnapshot {
-  const pool = simulatePool(rng, race)
-  const odds = calculateOdds(pool)
+  const byHorse = new Map(odds.map(o => [o.horseId, o]))
   const favoriteId = odds[0]?.horseId ?? ''
-
-  return { pool, odds, favoriteId }
+  return { odds, byHorse, favoriteId }
 }
 
-// Generate MTP snapshots — odds evolve as the pool fills
-export function generateMTPSnapshots(
-  rng: Rng,
-  race: Race,
-): MarketSnapshot[] {
-  // Morning line (rough estimate, small pool)
-  const snapshots: MarketSnapshot[] = []
+// ── Build the full multi-pool snapshot ─────────────────────────
 
-  // 4 snapshots: MTP 5:00 (25%), 3:00 (50%), 1:00 (75%), 0:00 (100%)
+export function buildMarketSnapshot(rng: Rng, race: Race, nextRace?: Race): MarketSnapshot {
+  const active = race.entries.filter(e => !e.scratched)
+  const winPool = simulateWinPool(rng, race, active)
+  const placePool = simulatePlacePool(rng, race, active)
+  const showPool = simulateShowPool(rng, race, active)
+  const exactaPool = simulateExactaPool(rng, race, active)
+  const quinellaPool = simulateQuinellaPool(rng, race, active)
+  let dailyDoublePool: BetPool | null = null
+  if (nextRace) {
+    const nextActive = nextRace.entries.filter(e => !e.scratched)
+    dailyDoublePool = simulateDailyDoublePool(rng, race, nextRace, active, nextActive)
+  }
+
+  const { odds, byHorse, favoriteId } = calculateOdds(winPool)
+  return {
+    winPool, placePool, showPool, exactaPool, quinellaPool, dailyDoublePool,
+    odds, oddsByHorse: byHorse, favoriteId,
+  }
+}
+
+// Morning line — the track handicapper's pre-betting estimate, printed
+// in the program before a single dollar is wagered. It's what THEY
+// think the final odds will be; the real crowd often disagrees. A
+// horse whose live odds fall well below ML has been "bet down"
+// (smart money or stable connections); one drifting upward is
+// perceived as worse than advertised.
+export function generateMorningLine(rng: Rng, race: Race): OddsLine[] {
+  const active = race.entries.filter(e => !e.scratched)
+  const buckets = new Map<string, number>()
+  for (const e of active) buckets.set(e.horse.id, 0)
+
+  // Fewer "votes" and more noise — one handicapper is less reliable
+  // than a crowd of a thousand.
+  const ML_BETTORS = 100
+  for (let b = 0; b < ML_BETTORS; b++) {
+    const pick = pickOne(rng, active, race, 0, 18)  // no recreational, higher σ
+    buckets.set(pick.horse.id, (buckets.get(pick.horse.id) ?? 0) + BET_UNIT)
+  }
+
+  const pool: BetPool = { totalPool: ML_BETTORS * BET_UNIT, buckets }
+  return calculateOdds(pool).odds
+}
+
+// MTP (Minutes To Post) snapshots — odds evolve as the pool fills. We
+// simulate progressively larger partial crowds to show how the board
+// moves. At MTP 0:00 (post time), a 5% chance of "late money" triggers
+// a surge onto a non-favorite: think stable connections or a sharp
+// pro dropping a big ticket in the last seconds. This is visible on
+// real tote boards as a sudden drop in a horse's odds.
+export function generateMTPSnapshots(rng: Rng, race: Race, nextRace?: Race): MarketSnapshot[] {
+  const snapshots: MarketSnapshot[] = []
   const poolFractions = [0.25, 0.50, 0.75, 1.0]
+  const active = race.entries.filter(e => !e.scratched)
 
   for (const fraction of poolFractions) {
-    // Simulate a partial pool by running fewer bettors
-    const partialBettors = Math.floor(SIMULATED_BETTORS * fraction)
-    const activeEntries = race.entries.filter(e => !e.scratched)
-    const horsePool = new Map<string, number>()
+    const partial = Math.floor(SIMULATED_BETTORS * fraction)
+    const buckets = new Map<string, number>()
+    for (const e of active) buckets.set(e.horse.id, 0)
 
-    for (const entry of activeEntries) {
-      horsePool.set(entry.horse.id, 0)
+    for (let b = 0; b < partial; b++) {
+      const pick = pickOne(rng, active, race, RECREATIONAL_FRACTION.win)
+      buckets.set(pick.horse.id, (buckets.get(pick.horse.id) ?? 0) + BET_UNIT)
     }
 
-    for (let b = 0; b < partialBettors; b++) {
-      let bestId = activeEntries[0]!.horse.id
-      let bestEstimate = -Infinity
+    let totalPool = partial * BET_UNIT
 
-      for (const entry of activeEntries) {
-        const est = estimateHorseStrength(entry, race, rng)
-        if (est > bestEstimate) {
-          bestEstimate = est
-          bestId = entry.horse.id
-        }
-      }
-
-      horsePool.set(bestId, (horsePool.get(bestId) ?? 0) + 2)
-    }
-
-    const totalPool = Array.from(horsePool.values()).reduce((a, b) => a + b, 0)
-    const pool: PoolState = { totalPool, horsePool }
-
-    // Apply late money surge on final snapshot (5% chance)
     if (fraction === 1.0 && rng.next() < 0.05) {
-      const entries = activeEntries.filter(e => {
-        const amount = horsePool.get(e.horse.id) ?? 0
-        return amount / totalPool < 0.15 // only on non-favorites
+      // Late money on a non-favorite
+      const candidates = active.filter(e => {
+        const amount = buckets.get(e.horse.id) ?? 0
+        return amount / totalPool < 0.15
       })
-      if (entries.length > 0) {
-        const surgeHorse = rng.pick(entries)
+      if (candidates.length > 0) {
+        const surgeHorse = rng.pick(candidates)
         const surgeAmount = Math.floor(totalPool * 0.30)
-        horsePool.set(surgeHorse.horse.id, (horsePool.get(surgeHorse.horse.id) ?? 0) + surgeAmount)
-        pool.totalPool += surgeAmount
+        buckets.set(surgeHorse.horse.id, (buckets.get(surgeHorse.horse.id) ?? 0) + surgeAmount)
+        totalPool += surgeAmount
       }
     }
 
-    const odds = calculateOdds(pool)
-    const favoriteId = odds[0]?.horseId ?? ''
-    snapshots.push({ pool, odds, favoriteId })
+    // Stub pools for non-Win bets on MTP — the tote display only needs
+    // Win-derived odds for the MTP ticker, so we leave the others as
+    // empty placeholders. A fuller sim could animate all pools.
+    const winPool: BetPool = { totalPool, buckets }
+    const emptyPool = (): BetPool => ({ totalPool: 0, buckets: new Map() })
+    const { odds, byHorse, favoriteId } = calculateOdds(winPool)
+    snapshots.push({
+      winPool,
+      placePool: emptyPool(),
+      showPool: emptyPool(),
+      exactaPool: emptyPool(),
+      quinellaPool: emptyPool(),
+      dailyDoublePool: nextRace ? emptyPool() : null,
+      odds, oddsByHorse: byHorse, favoriteId,
+    })
   }
 
   return snapshots
