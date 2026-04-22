@@ -11,6 +11,17 @@ export function Announcer({ lines, speed = 30, onComplete }: AnnouncerProps) {
   const [lineIdx, setLineIdx] = useState(0)
   const [charIdx, setCharIdx] = useState(0)
 
+  // Reset the typewriter whenever the script changes — otherwise a new
+  // set of lines would resume mid-word from where the previous one ended.
+  // Done via "adjusting state while rendering" (React docs pattern) so
+  // the reset happens before paint rather than in a cascading effect.
+  const [prevLines, setPrevLines] = useState(lines)
+  if (prevLines !== lines) {
+    setPrevLines(lines)
+    setLineIdx(0)
+    setCharIdx(0)
+  }
+
   const currentLine = lines[lineIdx] ?? ''
   const displayText = currentLine.slice(0, charIdx)
 

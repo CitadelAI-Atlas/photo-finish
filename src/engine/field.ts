@@ -9,6 +9,32 @@ import { JOCKEYS } from '@/data/jockeys'
 import { QUIRKS, QUIRK_CHANCE } from '@/data/quirks'
 import type { Rng } from './rng'
 
+// ── Tuning constants ───────────────────────────────────────────
+// Knobs for field generation. Adjusting these shifts the feel of the
+// game (e.g., more/less dramatic surface preferences, deeper fields).
+
+// Surface preference strengths: strong match boost, mild match boost.
+const SURFACE_FIT_STRONG = 8
+const SURFACE_FIT_MILD = 3
+
+// Distance preference bonus/penalty when horse meets (or fights) the trip.
+const DISTANCE_FIT_BONUS = 5
+
+// Post-gen surface preference roll thresholds.
+// < STRONG_P: strong pref; < MILD_P: mild pref; else neutral.
+const SURFACE_PREF_STRONG_P = 0.40
+const SURFACE_PREF_MILD_P = 0.70
+
+// Scratches — per-entry probability, floored by a minimum runners guard.
+const SCRATCH_RATE = 0.10
+
+// Distance category cutoffs (furlongs).
+const SPRINT_CUTOFF = 6.5
+const ROUTE_CUTOFF = 7.5
+
+// Name/jockey uniqueness retry budget before giving up (duplicate allowed).
+const MAX_GEN_ATTEMPTS = 50
+
 // ── PSR distributions by class ─────────────────────────────────
 
 const PSR_PARAMS: Record<RaceClass, { mean: number; std: number; min: number; max: number }> = {
@@ -71,8 +97,8 @@ function generatePSR(rng: Rng, raceClass: RaceClass): number {
 }
 
 function categorizeDistance(furlongs: number): DistanceCategory {
-  if (furlongs <= 6.5) return 'sprint'
-  if (furlongs <= 7.5) return 'middle'
+  if (furlongs <= SPRINT_CUTOFF) return 'sprint'
+  if (furlongs <= ROUTE_CUTOFF) return 'middle'
   return 'route'
 }
 
@@ -92,12 +118,11 @@ export function generateRaceConditions(rng: Rng, raceClass: RaceClass): RaceCond
 
 function generateSurfacePref(rng: Rng): { pref: SurfacePref; strength: SurfacePrefStrength } {
   const roll = rng.next()
-  if (roll < 0.40) {
-    // Strong preference
+  if (roll < SURFACE_PREF_STRONG_P) {
     const pref = weightedPick(rng, [['dirt' as SurfacePref, 0.6], ['turf' as SurfacePref, 0.3], ['synthetic' as SurfacePref, 0.1]])
     return { pref, strength: 'strong' }
   }
-  if (roll < 0.70) {
+  if (roll < SURFACE_PREF_MILD_P) {
     const pref = weightedPick(rng, [['dirt' as SurfacePref, 0.6], ['turf' as SurfacePref, 0.3], ['synthetic' as SurfacePref, 0.1]])
     return { pref, strength: 'mild' }
   }
@@ -115,16 +140,16 @@ export function surfaceFitBonus(horse: Horse, surface: Surface): number {
   if (horse.surfacePrefStrength === 'neutral') return 0
   const prefSurface = surfaceMatchesCode(horse.surfacePref)
   const match = prefSurface === surface
-  if (horse.surfacePrefStrength === 'strong') return match ? 8 : -8
-  return match ? 3 : -3 // mild
+  if (horse.surfacePrefStrength === 'strong') return match ? SURFACE_FIT_STRONG : -SURFACE_FIT_STRONG
+  return match ? SURFACE_FIT_MILD : -SURFACE_FIT_MILD
 }
 
 export function distanceFitBonus(horse: Horse, distanceCategory: DistanceCategory): number {
   if (horse.distancePref === 'versatile') return 0
-  if (horse.distancePref === 'sprint' && distanceCategory === 'sprint') return 5
-  if (horse.distancePref === 'sprint' && distanceCategory === 'route') return -5
-  if (horse.distancePref === 'route' && distanceCategory === 'route') return 5
-  if (horse.distancePref === 'route' && distanceCategory === 'sprint') return -5
+  if (horse.distancePref === 'sprint' && distanceCategory === 'sprint') return DISTANCE_FIT_BONUS
+  if (horse.distancePref === 'sprint' && distanceCategory === 'route') return -DISTANCE_FIT_BONUS
+  if (horse.distancePref === 'route' && distanceCategory === 'route') return DISTANCE_FIT_BONUS
+  if (horse.distancePref === 'route' && distanceCategory === 'sprint') return -DISTANCE_FIT_BONUS
   return 0 // middle distances are neutral for both
 }
 
@@ -158,7 +183,7 @@ export function generateField(rng: Rng, conditions: RaceConditions, fieldSize: n
     do {
       horse = generateHorse(rng, conditions.raceClass, `h${i + 1}`)
       attempts++
-    } while ((usedNames.has(horse.name) || usedJockeys.has(horse.jockeyId)) && attempts < 50)
+    } while ((usedNames.has(horse.name) || usedJockeys.has(horse.jockeyId)) && attempts < MAX_GEN_ATTEMPTS)
 
     usedNames.add(horse.name)
     usedJockeys.add(horse.jockeyId)
@@ -180,7 +205,7 @@ export function applyScratches(rng: Rng, entries: Entry[], minRunners: number = 
 
   return entries.map(entry => {
     if (activeCount <= minRunners) return entry
-    if (rng.next() < 0.10) {
+    if (rng.next() < SCRATCH_RATE) {
       activeCount--
       return {
         ...entry,
@@ -238,8 +263,11 @@ export function generateCard(
     races.push(generateRace(rng, i, trackCode, raceClass, maxFieldSize + featureFieldBonus))
   }
 
+  // Deterministic suffix from the post-generation rng state — same seed → same id.
+  // Drawn AFTER races so it doesn't perturb race generation.
+  const suffix = rng.int(0, 0xffffff).toString(16).padStart(6, '0')
   return {
-    id: `${trackCode}-card-${Date.now()}`,
+    id: `${trackCode}-card-${suffix}`,
     trackCode,
     races,
   }

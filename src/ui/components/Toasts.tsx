@@ -25,7 +25,12 @@ export function Toasts() {
   }, [notifications, consume])
 
   return (
-    <div className="fixed top-3 left-0 right-0 z-50 flex flex-col items-center gap-2 px-3 pointer-events-none">
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="false"
+      className="fixed top-3 left-0 right-0 z-50 flex flex-col items-center gap-2 px-3 pointer-events-none"
+    >
       <AnimatePresence>
         {notifications.map(n => (
           <motion.button

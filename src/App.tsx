@@ -34,17 +34,22 @@ function App() {
             currentTier={flow.currentTier}
             totalRaces={flow.totalRaces}
             totalWins={flow.totalWins}
+            biggestWin={flow.biggestWin}
+            longestStreak={flow.longestStreak}
             onStartCard={flow.startNewCard}
+            onReset={flow.resetGame}
           />
         )
 
       case 'raceCard':
-        if (!flow.currentRace || !flow.market) return null
+        if (!flow.currentRace || !flow.market || !flow.card) return null
         return (
           <RaceCard
+            card={flow.card}
             race={flow.currentRace}
             market={flow.market}
             morningLine={flow.morningLine}
+            mtpSnapshots={flow.mtpSnapshots}
             raceIndex={flow.currentRaceIndex}
             totalRaces={RACES_PER_CARD}
             bankroll={flow.bankroll}

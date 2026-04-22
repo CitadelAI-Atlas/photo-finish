@@ -87,7 +87,6 @@ describe('Field Generation', () => {
     // Run many iterations to test scratch logic
     const rng = new Rng(77)
     for (let i = 0; i < 200; i++) {
-      const conditions = generateRaceConditions(rng, 'MCL')
       const card = generateCard(rng, 'AQU', ['MCL'], 6)
       for (const race of card.races) {
         const active = race.entries.filter(e => !e.scratched).length

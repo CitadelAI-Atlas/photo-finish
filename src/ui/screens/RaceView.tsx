@@ -2,6 +2,21 @@ import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { Race, MarketSnapshot } from '@/engine/types'
 import { Announcer } from '@/ui/components/Announcer'
+import {
+  type Particle,
+  spawnHoofKick,
+  updateParticles,
+  drawParticles,
+} from './raceView/particles'
+import {
+  type RacePhase,
+  PHASES,
+  PHASE_DURATION,
+  phaseLabel,
+  easeInOutCubic,
+  baseProgress,
+  styleOffset,
+} from './raceView/phaseTiming'
 
 interface RaceViewProps {
   race: Race
@@ -10,19 +25,6 @@ interface RaceViewProps {
   playerHorseId: string | null
   onRaceComplete: () => void
 }
-
-type RacePhase = 'tote' | 'gate' | 'early' | 'mid' | 'stretch' | 'finish'
-
-const PHASE_DURATION: Record<RacePhase, number> = {
-  tote: 3500,
-  gate: 2200,
-  early: 3800,
-  mid: 3800,
-  stretch: 4500,
-  finish: 2800,
-}
-
-const PHASES: RacePhase[] = ['tote', 'gate', 'early', 'mid', 'stretch', 'finish']
 
 type CameraMode = 'start' | 'wide' | 'finish' | 'rail'
 function cameraForPhase(p: RacePhase): CameraMode {
@@ -37,6 +39,29 @@ const SILK_COLORS = [
   '#0891b2', '#e11d48', '#ea580c', '#4f46e5', '#059669',
   '#d97706', '#7c3aed',
 ]
+
+// Deterministic silk permutation for a given race. Without this every
+// field would show post 1 in red, post 2 in blue, etc. — the same
+// visual signature race after race. Fisher-Yates seeded off the race
+// id keeps colors varied between races but reproducible per seed.
+function seedFromString(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619)
+  return h >>> 0
+}
+function shuffledSilks(raceId: string): string[] {
+  let state = seedFromString(raceId) || 1
+  const rand = () => {
+    state = (state * 1664525 + 1013904223) >>> 0
+    return state / 0x100000000
+  }
+  const out = [...SILK_COLORS]
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    const tmp = out[i]!; out[i] = out[j]!; out[j] = tmp
+  }
+  return out
+}
 
 // ── Track geometry ─────────────────────────────────────────────
 // Stadium shape: two vertical straights connected by semicircle turns.
@@ -344,72 +369,6 @@ function drawLabels(ctx: CanvasRenderingContext2D, horses: HorseState[], geo: Tr
   ctx.restore()
 }
 
-// ── Particles (hoof kicks) ─────────────────────────────────────
-// World-space dirt/turf spray behind each running horse. Purely
-// cosmetic; seeded from Math.random (unlike engine RNG) because the
-// canvas layer is non-deterministic anyway (refresh rate, resize).
-
-interface Particle {
-  x: number; y: number
-  vx: number; vy: number
-  life: number; maxLife: number
-  size: number
-  color: string
-}
-
-function surfaceParticleColor(surface: string): string {
-  if (surface === 'T') return '#4a6b3d'
-  if (surface === 'S') return '#6b6b6b'
-  return '#8a6b4a'
-}
-
-function spawnHoofKick(
-  particles: Particle[],
-  x: number, y: number, angle: number,
-  surface: string,
-) {
-  // angle points forward along the rail; spray goes backward + upward.
-  const back = angle + Math.PI
-  const spread = 0.7
-  for (let i = 0; i < 2; i++) {
-    const theta = back + (Math.random() - 0.5) * spread
-    const speed = 30 + Math.random() * 50
-    const life = 0.35 + Math.random() * 0.3
-    particles.push({
-      x: x + Math.cos(back) * 4,
-      y: y + Math.sin(back) * 4,
-      vx: Math.cos(theta) * speed,
-      vy: Math.sin(theta) * speed - 15 - Math.random() * 25,
-      life,
-      maxLife: life,
-      size: 1 + Math.random() * 1.3,
-      color: surfaceParticleColor(surface),
-    })
-  }
-}
-
-function updateParticles(particles: Particle[], dt: number) {
-  const gravity = 90
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i]!
-    p.vy += gravity * dt
-    p.x += p.vx * dt
-    p.y += p.vy * dt
-    p.life -= dt
-    if (p.life <= 0) particles.splice(i, 1)
-  }
-}
-
-function drawParticles(ctx: CanvasRenderingContext2D, particles: Particle[]) {
-  for (const p of particles) {
-    const a = Math.max(0, Math.min(1, p.life / p.maxLife))
-    ctx.globalAlpha = a * 0.85
-    ctx.fillStyle = p.color
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill()
-  }
-  ctx.globalAlpha = 1
-}
-
 // ── Backdrop (screen space, drawn before camera transform) ─────
 // Dusk sky gradient + deterministic star field + grandstand
 // silhouette for wide/rail modes. Screen-space so it doesn't zoom
@@ -485,40 +444,130 @@ function drawSideView(
   w: number, h: number,
   horses: HorseState[],
   surface: string,
+  now: number,
 ) {
   drawBackdrop(ctx, w, h, 'rail')
 
-  const trackTop = h * 0.82
-  const trackBot = h * 0.98
-  ctx.fillStyle = surface === 'T' ? '#3d6b4a' : surface === 'S' ? '#4a4a4a' : '#b08968'
-  ctx.fillRect(0, trackTop, w, trackBot - trackTop)
+  // Bigger track band — gives more foreground for cinematic effect.
+  const trackTop = h * 0.78
+  const trackBot = h * 0.99
+  const trackH = trackBot - trackTop
 
-  // Outside rail (bottom of screen, closest to camera)
-  ctx.fillStyle = 'rgba(255,255,255,0.45)'
-  ctx.fillRect(0, trackBot - 2, w, 2)
-  // Inside rail (top of track band, far side)
-  ctx.fillStyle = 'rgba(255,255,255,0.25)'
-  ctx.fillRect(0, trackTop, w, 1.5)
+  // Base track surface with vertical gradient: darker at the far rail,
+  // lighter (sunlit) at the near rail. Reads as depth.
+  const grad = ctx.createLinearGradient(0, trackTop, 0, trackBot)
+  if (surface === 'T') {
+    grad.addColorStop(0, '#2a5536'); grad.addColorStop(1, '#4d7e59')
+  } else if (surface === 'S') {
+    grad.addColorStop(0, '#363636'); grad.addColorStop(1, '#5a5a5a')
+  } else {
+    grad.addColorStop(0, '#886546'); grad.addColorStop(1, '#c0946e')
+  }
+  ctx.fillStyle = grad
+  ctx.fillRect(0, trackTop, w, trackH)
 
-  // Finish wire + checkered pole at ~0.82w
-  const wireX = w * 0.82
-  ctx.strokeStyle = 'rgba(255,255,255,0.9)'
-  ctx.lineWidth = 2
-  ctx.beginPath()
-  ctx.moveTo(wireX, h * 0.60)
-  ctx.lineTo(wireX, trackBot)
-  ctx.stroke()
-  for (let i = 0; i < 10; i++) {
-    ctx.fillStyle = i % 2 === 0 ? '#fff' : '#000'
-    ctx.fillRect(wireX - 3, h * 0.60 + i * 4, 6, 4)
+  // Track shadow under far rail — inky strip suggests the crowd wall behind.
+  const railShadow = ctx.createLinearGradient(0, trackTop, 0, trackTop + 14)
+  railShadow.addColorStop(0, 'rgba(0,0,0,0.45)')
+  railShadow.addColorStop(1, 'rgba(0,0,0,0)')
+  ctx.fillStyle = railShadow
+  ctx.fillRect(0, trackTop, w, 14)
+
+  // Scrolling ground stripes — sense of speed. Tied to leader progress
+  // so stripes crawl faster when the field is running.
+  const leaderT = horses.length > 0 ? Math.max(...horses.map(h => h.currentT)) : 0
+  const stripePeriod = 64
+  const scroll = ((leaderT * 2400) % stripePeriod + stripePeriod) % stripePeriod
+  ctx.fillStyle = 'rgba(0,0,0,0.09)'
+  for (let i = -1; i * stripePeriod < w + stripePeriod; i++) {
+    const sx = i * stripePeriod - scroll
+    ctx.fillRect(sx, trackTop + 8, stripePeriod * 0.45, trackH - 10)
   }
 
-  // Horses: map (leaderT - currentT) to horizontal offset from wire.
-  // Inner lane (lane 0) = closest to camera = largest + lowest in frame.
+  // Rails
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'
+  ctx.fillRect(0, trackTop - 0.5, w, 1.5)           // far rail (inside)
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'
+  ctx.fillRect(0, trackBot - 2, w, 2)                // near rail (outside)
+
+  // Near-rail posts scroll by at double speed — parallax sense of rush.
+  const postPeriod = 110
+  const postScroll = ((leaderT * 4800) % postPeriod + postPeriod) % postPeriod
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'
+  for (let i = -1; i * postPeriod < w + postPeriod; i++) {
+    const sx = i * postPeriod - postScroll
+    ctx.fillRect(sx, trackBot - 11, 2, 10)
+  }
+
+  // Furlong pole — scrolls toward the wire, fades as it approaches.
+  // Repeats every 0.33 of T so the player sees a pole march past each phase beat.
+  const poleT = ((leaderT * 3) % 1 + 1) % 1
+  const poleX = w - poleT * w * 1.15
+  const poleAlpha = Math.max(0, 1 - Math.abs(poleX - w * 0.82) / (w * 0.6))
+  if (poleX > -20 && poleX < w + 20) {
+    ctx.globalAlpha = poleAlpha
+    ctx.fillStyle = '#fff'
+    ctx.fillRect(poleX, trackTop - 26, 3, 26)
+    ctx.fillStyle = '#16a34a'
+    ctx.fillRect(poleX, trackTop - 26, 3, 7)
+    ctx.globalAlpha = 1
+  }
+
+  // ── Finish wire rig ──────────────────────────────────────────
+  const wireX = w * 0.82
+
+  // Checkered ground strip at the wire
+  for (let i = 0; i < trackH; i += 6) {
+    ctx.fillStyle = Math.floor(i / 6) % 2 === 0 ? '#fff' : '#111'
+    ctx.fillRect(wireX - 4, trackTop + i, 8, 6)
+  }
+
+  // Left support pole (near-side, tall)
+  ctx.fillStyle = '#1a1512'
+  ctx.fillRect(wireX - 3, h * 0.30, 4, trackBot - h * 0.30)
+  // Pole cap
+  ctx.fillStyle = '#dc2626'
+  ctx.fillRect(wireX - 5, h * 0.30, 8, 4)
+
+  // Overhead wire across the track
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+  ctx.lineWidth = 1.5
+  ctx.beginPath()
+  ctx.moveTo(wireX - 60, h * 0.33)
+  ctx.lineTo(wireX + 30, h * 0.33)
+  ctx.stroke()
+
+  // Checkered pennant hanging from wire — gently sways
+  const sway = Math.sin(now / 400) * 2
+  const penX = wireX - 28 + sway
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 4; col++) {
+      ctx.fillStyle = (row + col) % 2 === 0 ? '#fff' : '#111'
+      ctx.fillRect(penX + col * 7, h * 0.33 + row * 6, 7, 6)
+    }
+  }
+
+  // "FINISH" nameplate above the wire — glowing amber
+  ctx.save()
+  ctx.shadowColor = 'rgba(251,191,36,0.9)'
+  ctx.shadowBlur = 10
+  ctx.fillStyle = '#fde68a'
+  ctx.font = 'bold 11px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillText('FINISH', wireX - 15, h * 0.28)
+  ctx.restore()
+
+  // Spotlight cone washing down from the wire onto the track
+  const spot = ctx.createRadialGradient(wireX, h * 0.33, 5, wireX, trackBot, h * 0.25)
+  spot.addColorStop(0, 'rgba(255,240,200,0.22)')
+  spot.addColorStop(1, 'rgba(255,240,200,0)')
+  ctx.fillStyle = spot
+  ctx.fillRect(wireX - h * 0.18, h * 0.33, h * 0.36, trackBot - h * 0.33)
+
+  // ── Horses ───────────────────────────────────────────────────
   const lanes = horses.length
-  const laneSpan = (trackBot - trackTop) - 22
+  const laneSpan = trackH - 20
   const laneStep = laneSpan / Math.max(1, lanes - 1)
-  const leaderT = horses.length > 0 ? Math.max(...horses.map(h => h.currentT)) : 0
   const tToPx = Math.max(2400, w * 8)
   const baseScale = Math.min(2.4, Math.max(1.2, w / 380))
 
@@ -527,10 +576,52 @@ function drawSideView(
   for (const ho of sorted) {
     const gap = leaderT - ho.currentT
     const x = wireX - gap * tToPx
-    const y = trackBot - 15 - ho.lane * laneStep
+    const y = trackBot - 14 - ho.lane * laneStep
     const s = baseScale * (1 - ho.lane * 0.04)
+
+    // Ground shadow — soft, behind horse
+    ctx.save()
+    ctx.globalAlpha = 0.38
+    ctx.fillStyle = '#000'
+    ctx.beginPath()
+    ctx.ellipse(x + 1 * s, y + 6 * s, 15 * s, 3 * s, 0, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+
+    // Speed streaks trailing behind — 3 short lines modulated by gallop.
+    ctx.save()
+    ctx.strokeStyle = surface === 'T' ? 'rgba(220,240,220,0.55)' : 'rgba(245,230,200,0.55)'
+    for (let i = 0; i < 3; i++) {
+      const yo = (i - 1) * 3 * s
+      const wob = Math.abs(Math.sin(ho.gallop + i * 1.3))
+      const len = (14 + wob * 10) * s
+      ctx.globalAlpha = 0.28 - i * 0.07
+      ctx.lineWidth = (1.3 - i * 0.25) * s
+      ctx.beginPath()
+      ctx.moveTo(x - 16 * s, y - 1 * s + yo)
+      ctx.lineTo(x - 16 * s - len, y - 1 * s + yo)
+      ctx.stroke()
+    }
+    ctx.restore()
+
     drawHorseProfile(ctx, x, y, ho.color, ho.isPlayer, ho.gallop, ho.pp, s)
   }
+
+  // Foreground dust haze — subtle warm tint rising from the track near
+  // the camera. Sells the weight of the pack thundering past.
+  const haze = ctx.createLinearGradient(0, trackBot - 28, 0, trackBot)
+  const hazeColor = surface === 'T' ? '160,190,150' : surface === 'S' ? '150,150,150' : '200,170,140'
+  haze.addColorStop(0, `rgba(${hazeColor},0)`)
+  haze.addColorStop(1, `rgba(${hazeColor},0.22)`)
+  ctx.fillStyle = haze
+  ctx.fillRect(0, trackBot - 28, w, 28)
+
+  // Subtle vignette top + sides
+  const vig = ctx.createRadialGradient(w / 2, h * 0.6, h * 0.4, w / 2, h * 0.6, h * 0.9)
+  vig.addColorStop(0, 'rgba(0,0,0,0)')
+  vig.addColorStop(1, 'rgba(0,0,0,0.35)')
+  ctx.fillStyle = vig
+  ctx.fillRect(0, 0, w, h)
 }
 
 function drawHorseProfile(
@@ -647,15 +738,29 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
   const camTransRef = useRef(1)
   const particlesRef = useRef<Particle[]>([])
 
+  // Respect prefers-reduced-motion: skip the animated run entirely and
+  // advance straight to results after a brief beat. Keeps the game
+  // playable for vestibular / motion-sensitive users without rebuilding
+  // the canvas pipeline in a static variant.
+  const reduceMotion = typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+
+  useEffect(() => {
+    if (!reduceMotion) return
+    const t = setTimeout(onRaceComplete, 900)
+    return () => clearTimeout(t)
+  }, [reduceMotion, onRaceComplete])
+
   const active = race.entries.filter(e => !e.scratched)
 
   // Init
   useEffect(() => {
+    const silks = shuffledSilks(race.id)
     horsesRef.current = active.map((e, i) => ({
       id: e.horse.id, name: e.horse.name, pp: e.postPosition,
       targetT: 0, currentT: 0, lane: i,
       isPlayer: e.horse.id === playerHorseId,
-      color: SILK_COLORS[i % SILK_COLORS.length]!,
+      color: silks[i % silks.length]!,
       style: e.horse.runningStyle,
       gallop: Math.random() * Math.PI * 2,
     }))
@@ -782,7 +887,7 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
       ctx.clearRect(0, 0, w, h)
 
       if (mode === 'rail') {
-        drawSideView(ctx, w, h, horses, race.conditions.surface)
+        drawSideView(ctx, w, h, horses, race.conditions.surface, now)
       } else {
         let target: Cam
         switch (mode) {
@@ -824,6 +929,16 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
     return () => cancelAnimationFrame(animRef.current)
   }, [phase, race.conditions.surface])
 
+  if (reduceMotion) {
+    return (
+      <div className="h-dvh bg-stone-900 flex flex-col items-center justify-center text-stone-100 px-6" role="status" aria-live="polite">
+        <p className="text-xs font-mono text-amber-400 uppercase tracking-widest">Race {race.raceNumber} — {race.trackCode}</p>
+        <p className="mt-4 text-lg font-bold">Running the race…</p>
+        <p className="mt-2 text-sm text-stone-400 text-center">Animation disabled per your reduced-motion setting. Results will appear shortly.</p>
+      </div>
+    )
+  }
+
   return (
     <div className="h-dvh bg-stone-900 flex flex-col overflow-hidden">
       {/* Header */}
@@ -837,9 +952,14 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
         </AnimatePresence>
       </div>
 
-      {/* Canvas — takes ALL remaining portrait space */}
+      {/* Canvas — takes ALL remaining portrait space.
+          aria-live region below surfaces the same race beats to
+          assistive tech since the canvas itself is unreadable. */}
       <div ref={wrapperRef} className="flex-1 min-h-0 relative">
-        <canvas ref={canvasRef} className="absolute inset-0" />
+        <canvas ref={canvasRef} className="absolute inset-0" aria-hidden />
+        <div role="status" aria-live="polite" className="sr-only">
+          {phaseLabel(phase)}: {announceLines[announceLines.length - 1] ?? ''}
+        </div>
       </div>
 
       {/* Announcer */}
@@ -850,72 +970,3 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
   )
 }
 
-// ── Helpers ────────────────────────────────────────────────────
-
-function phaseLabel(p: RacePhase): string {
-  switch (p) {
-    case 'tote': return 'Post Parade'
-    case 'gate': return 'At the Gate'
-    case 'early': return 'First Call'
-    case 'mid': return 'Far Turn'
-    case 'stretch': return 'Top of Stretch'
-    case 'finish': return 'Official!'
-  }
-}
-
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
-}
-
-// Each phase covers a fraction of the track such that average speed is similar.
-// Phase durations: gate=2.2s early=3.8s mid=3.8s stretch=4.5s finish=2.8s
-// Cumulative: gate→0.05, early→0.30, mid→0.55, stretch→0.85, finish→1.0
-function baseProgress(phase: RacePhase, t: number): number {
-  switch (phase) {
-    case 'tote': return 0
-    case 'gate': return t * 0.05            // 0.023/s — short burst out of gate
-    case 'early': return 0.05 + t * 0.25    // 0.066/s
-    case 'mid': return 0.30 + t * 0.25      // 0.066/s
-    case 'stretch': return 0.55 + t * 0.30  // 0.067/s
-    case 'finish': return 0.85 + t * 0.15   // 0.054/s — slight slowdown at wire
-  }
-}
-
-// Style offsets as continuous [start, end] pairs per phase.
-// Each phase's start value equals the previous phase's end value.
-// E = front-runner: leads early, fades late
-// S = closer: trails early, surges late
-// P = presser: sits mid-pack, steady move
-const STYLE_OFFSETS: Record<string, Record<RacePhase, [number, number]>> = {
-  E: {
-    tote:    [0, 0],
-    gate:    [0, 0.02],
-    early:   [0.02, 0.06],
-    mid:     [0.06, 0.05],
-    stretch: [0.05, 0.01],
-    finish:  [0.01, 0.01],
-  },
-  S: {
-    tote:    [0, 0],
-    gate:    [0, -0.01],
-    early:   [-0.01, -0.04],
-    mid:     [-0.04, -0.02],
-    stretch: [-0.02, 0.04],
-    finish:  [0.04, 0.04],
-  },
-  P: {
-    tote:    [0, 0],
-    gate:    [0, 0.005],
-    early:   [0.005, 0.01],
-    mid:     [0.01, 0.02],
-    stretch: [0.02, 0.03],
-    finish:  [0.03, 0.03],
-  },
-}
-
-function styleOffset(style: string, phase: RacePhase, t: number, lane: number): number {
-  const sp = lane * 0.004
-  const offsets = STYLE_OFFSETS[style] ?? STYLE_OFFSETS.P!
-  const [start, end] = offsets[phase]!
-  return start + (end - start) * t + sp
-}

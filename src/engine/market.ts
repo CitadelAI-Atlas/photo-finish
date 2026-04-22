@@ -1,10 +1,10 @@
 import type {
-  Entry, Race, BetPool, OddsLine, MarketSnapshot, BetType,
+  Entry, Race, BetPool, OddsLine, MarketSnapshot, BetType, TakeoutRates,
 } from './types'
 import {
-  TAKEOUT_WIN, SIMULATED_BETTORS, POOL_BETTOR_FRACTIONS, BET_UNIT,
+  DEFAULT_TAKEOUT_RATES, SIMULATED_BETTORS, POOL_BETTOR_FRACTIONS, BET_UNIT,
 } from './types'
-import { JOCKEYS, JOCKEY_BONUS } from '@/data/jockeys'
+import { JOCKEYS, JOCKEY_PERCEIVED_BONUS } from '@/data/jockeys'
 import { surfaceFitBonus, distanceFitBonus } from './field'
 import type { Rng } from './rng'
 
@@ -38,13 +38,33 @@ const RECREATIONAL_FRACTION: Record<BetType, number> = {
   dailyDouble: 0.25,
 }
 
+// ── Tuning constants ───────────────────────────────────────────
+
+// Per-handicapper noise (PSR points). Wider σ = more disagreement.
+const HANDICAPPER_NOISE_SIGMA = 12
+
+// Morning line is produced by a single handicapper, not a crowd, so
+// we crank the noise up.
+const MORNING_LINE_NOISE_SIGMA = 18
+const MORNING_LINE_BETTORS = 100
+
+// Probability the final MTP snapshot contains a "sharp money" surge.
+const LATE_MONEY_CHANCE = 0.05
+// Surge only lands on horses holding less than this share of the Win pool.
+const LATE_MONEY_SHARE_THRESHOLD = 0.15
+// Size of the surge, as a fraction of the current total pool.
+const LATE_MONEY_SURGE_FRACTION = 0.30
+
+// MTP ticker pool fill fractions (0.25 = 25% of final betting volume).
+const MTP_POOL_FRACTIONS = [0.25, 0.50, 0.75, 1.0] as const
+
 function getJockeyBonus(jockeyId: string): number {
   const jockey = JOCKEYS.find(j => j.id === jockeyId)
   if (!jockey) return 0
-  return JOCKEY_BONUS[jockey.tier] ?? 0
+  return JOCKEY_PERCEIVED_BONUS[jockey.tier] ?? 0
 }
 
-function estimateHorseStrength(entry: Entry, race: Race, rng: Rng, noiseSigma = 12): number {
+function estimateHorseStrength(entry: Entry, race: Race, rng: Rng, noiseSigma = HANDICAPPER_NOISE_SIGMA): number {
   const h = entry.horse
   const cond = race.conditions
   return h.psr
@@ -55,7 +75,7 @@ function estimateHorseStrength(entry: Entry, race: Race, rng: Rng, noiseSigma = 
 }
 
 // Pick one horse for one bettor — either handicap-driven or random.
-function pickOne(rng: Rng, entries: Entry[], race: Race, recFrac: number, noiseSigma = 12): Entry {
+function pickOne(rng: Rng, entries: Entry[], race: Race, recFrac: number, noiseSigma = HANDICAPPER_NOISE_SIGMA): Entry {
   if (rng.next() < recFrac) return rng.pick(entries)
 
   let best = entries[0]!
@@ -192,7 +212,7 @@ function snapToBucket(rawOdds: number): number {
 
 // Derive tote-board odds from the Win pool. This is what bettors see;
 // it is NOT used to compute exotic payouts (those have their own pool).
-export function calculateOdds(pool: BetPool, takeout: number = TAKEOUT_WIN): {
+export function calculateOdds(pool: BetPool, takeout: number = DEFAULT_TAKEOUT_RATES.win): {
   odds: OddsLine[]
   byHorse: Map<string, OddsLine>
   favoriteId: string
@@ -215,7 +235,12 @@ export function calculateOdds(pool: BetPool, takeout: number = TAKEOUT_WIN): {
 
 // ── Build the full multi-pool snapshot ─────────────────────────
 
-export function buildMarketSnapshot(rng: Rng, race: Race, nextRace?: Race): MarketSnapshot {
+export function buildMarketSnapshot(
+  rng: Rng,
+  race: Race,
+  nextRace?: Race,
+  takeoutRates: TakeoutRates = DEFAULT_TAKEOUT_RATES,
+): MarketSnapshot {
   const active = race.entries.filter(e => !e.scratched)
   const winPool = simulateWinPool(rng, race, active)
   const placePool = simulatePlacePool(rng, race, active)
@@ -228,9 +253,10 @@ export function buildMarketSnapshot(rng: Rng, race: Race, nextRace?: Race): Mark
     dailyDoublePool = simulateDailyDoublePool(rng, race, nextRace, active, nextActive)
   }
 
-  const { odds, byHorse, favoriteId } = calculateOdds(winPool)
+  const { odds, byHorse, favoriteId } = calculateOdds(winPool, takeoutRates.win)
   return {
     winPool, placePool, showPool, exactaPool, quinellaPool, dailyDoublePool,
+    takeoutRates,
     odds, oddsByHorse: byHorse, favoriteId,
   }
 }
@@ -246,15 +272,12 @@ export function generateMorningLine(rng: Rng, race: Race): OddsLine[] {
   const buckets = new Map<string, number>()
   for (const e of active) buckets.set(e.horse.id, 0)
 
-  // Fewer "votes" and more noise — one handicapper is less reliable
-  // than a crowd of a thousand.
-  const ML_BETTORS = 100
-  for (let b = 0; b < ML_BETTORS; b++) {
-    const pick = pickOne(rng, active, race, 0, 18)  // no recreational, higher σ
+  for (let b = 0; b < MORNING_LINE_BETTORS; b++) {
+    const pick = pickOne(rng, active, race, 0, MORNING_LINE_NOISE_SIGMA)
     buckets.set(pick.horse.id, (buckets.get(pick.horse.id) ?? 0) + BET_UNIT)
   }
 
-  const pool: BetPool = { totalPool: ML_BETTORS * BET_UNIT, buckets }
+  const pool: BetPool = { totalPool: MORNING_LINE_BETTORS * BET_UNIT, buckets }
   return calculateOdds(pool).odds
 }
 
@@ -264,12 +287,16 @@ export function generateMorningLine(rng: Rng, race: Race): OddsLine[] {
 // a surge onto a non-favorite: think stable connections or a sharp
 // pro dropping a big ticket in the last seconds. This is visible on
 // real tote boards as a sudden drop in a horse's odds.
-export function generateMTPSnapshots(rng: Rng, race: Race, nextRace?: Race): MarketSnapshot[] {
+export function generateMTPSnapshots(
+  rng: Rng,
+  race: Race,
+  nextRace?: Race,
+  takeoutRates: TakeoutRates = DEFAULT_TAKEOUT_RATES,
+): MarketSnapshot[] {
   const snapshots: MarketSnapshot[] = []
-  const poolFractions = [0.25, 0.50, 0.75, 1.0]
   const active = race.entries.filter(e => !e.scratched)
 
-  for (const fraction of poolFractions) {
+  for (const fraction of MTP_POOL_FRACTIONS) {
     const partial = Math.floor(SIMULATED_BETTORS * fraction)
     const buckets = new Map<string, number>()
     for (const e of active) buckets.set(e.horse.id, 0)
@@ -281,15 +308,15 @@ export function generateMTPSnapshots(rng: Rng, race: Race, nextRace?: Race): Mar
 
     let totalPool = partial * BET_UNIT
 
-    if (fraction === 1.0 && rng.next() < 0.05) {
-      // Late money on a non-favorite
+    if (fraction === 1.0 && rng.next() < LATE_MONEY_CHANCE) {
+      // Late "sharp money" surge lands on a horse under the share threshold.
       const candidates = active.filter(e => {
         const amount = buckets.get(e.horse.id) ?? 0
-        return amount / totalPool < 0.15
+        return amount / totalPool < LATE_MONEY_SHARE_THRESHOLD
       })
       if (candidates.length > 0) {
         const surgeHorse = rng.pick(candidates)
-        const surgeAmount = Math.floor(totalPool * 0.30)
+        const surgeAmount = Math.floor(totalPool * LATE_MONEY_SURGE_FRACTION)
         buckets.set(surgeHorse.horse.id, (buckets.get(surgeHorse.horse.id) ?? 0) + surgeAmount)
         totalPool += surgeAmount
       }
@@ -300,7 +327,7 @@ export function generateMTPSnapshots(rng: Rng, race: Race, nextRace?: Race): Mar
     // empty placeholders. A fuller sim could animate all pools.
     const winPool: BetPool = { totalPool, buckets }
     const emptyPool = (): BetPool => ({ totalPool: 0, buckets: new Map() })
-    const { odds, byHorse, favoriteId } = calculateOdds(winPool)
+    const { odds, byHorse, favoriteId } = calculateOdds(winPool, takeoutRates.win)
     snapshots.push({
       winPool,
       placePool: emptyPool(),
@@ -308,6 +335,7 @@ export function generateMTPSnapshots(rng: Rng, race: Race, nextRace?: Race): Mar
       exactaPool: emptyPool(),
       quinellaPool: emptyPool(),
       dailyDoublePool: nextRace ? emptyPool() : null,
+      takeoutRates,
       odds, oddsByHorse: byHorse, favoriteId,
     })
   }

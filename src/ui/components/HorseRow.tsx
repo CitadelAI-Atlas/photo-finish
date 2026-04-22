@@ -88,10 +88,10 @@ export function HorseRow({ entry, oddsLine, morningLineOdds, isFavorite, isSelec
             {oddsLine ? formatOdds(oddsLine.odds) : '--'}
           </p>
           {driftDirection === 'down' && (
-            <span className="text-green-600 text-xs leading-none" title="Bet down (live > ML)">▼</span>
+            <span className="text-green-600 text-xs leading-none" title="Bet down (live < ML)">▼</span>
           )}
           {driftDirection === 'up' && (
-            <span className="text-red-500 text-xs leading-none" title="Drifted up (live < ML)">▲</span>
+            <span className="text-red-500 text-xs leading-none" title="Drifted up (live > ML)">▲</span>
           )}
         </div>
         {morningLineOdds && (

@@ -2,6 +2,13 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { RaceCard, BetType, RaceClass } from '@/engine/types'
 import { PROGRESSION_TIERS, STIPEND_THRESHOLD, STIPEND_AMOUNT, CARD_COMPLETION_BONUS, RACES_PER_CARD } from '@/engine/types'
+import { ACHIEVEMENTS_BY_ID } from '@/data/achievements'
+
+// Thresholds for bankroll-based achievements — kept here to avoid
+// another round trip through the type file.
+const BANKROLL_BUILDER_THRESHOLD = 500
+const SELF_MADE_THRESHOLD = 2000
+const SHARP_EYE_STREAK = 3
 
 export interface GameState {
   // Player
@@ -115,9 +122,30 @@ export const useGameStore = create<GameState & GameActions>()(
 
       collectPayout: (amount: number) => set(s => {
         if (!Number.isFinite(amount) || amount < 0) return {}
+        const newBankroll = s.bankroll + amount
+        const unlocks: string[] = []
+        if (newBankroll >= BANKROLL_BUILDER_THRESHOLD && !s.achievements.includes('bankrollBuilder')) {
+          unlocks.push('bankrollBuilder')
+        }
+        if (newBankroll >= SELF_MADE_THRESHOLD && s.stipendsReceived === 0 && !s.achievements.includes('selfMade')) {
+          unlocks.push('selfMade')
+        }
         return {
-          bankroll: s.bankroll + amount,
+          bankroll: newBankroll,
           totalReturned: s.totalReturned + amount,
+          ...(unlocks.length
+            ? {
+                achievements: [...s.achievements, ...unlocks],
+                pendingNotifications: [
+                  ...s.pendingNotifications,
+                  ...unlocks.map(id => ({
+                    id: `ach-${id}-${Date.now()}`,
+                    message: `Achievement unlocked — ${ACHIEVEMENTS_BY_ID[id]?.label ?? id}`,
+                    tone: 'bonus' as const,
+                  })),
+                ],
+              }
+            : {}),
         }
       }),
 
@@ -208,22 +236,58 @@ export const useGameStore = create<GameState & GameActions>()(
 
       hasSeenTooltip: (id: string) => get().seenTooltips.includes(id),
 
-      recordWin: (amount: number) => set(s => ({
-        totalRaces: s.totalRaces + 1,
-        totalWins: s.totalWins + 1,
-        currentStreak: s.currentStreak + 1,
-        longestStreak: Math.max(s.longestStreak, s.currentStreak + 1),
-        biggestWin: Math.max(s.biggestWin, amount),
-      })),
+      recordWin: (amount: number) => set(s => {
+        const newStreak = s.currentStreak + 1
+        const newWins = s.totalWins + 1
+        const unlocks: string[] = []
+        if (newWins === 1 && !s.achievements.includes('firstWinner')) {
+          unlocks.push('firstWinner')
+        }
+        if (newStreak >= SHARP_EYE_STREAK && !s.achievements.includes('sharpEye')) {
+          unlocks.push('sharpEye')
+        }
+        return {
+          totalRaces: s.totalRaces + 1,
+          totalWins: newWins,
+          currentStreak: newStreak,
+          longestStreak: Math.max(s.longestStreak, newStreak),
+          biggestWin: Math.max(s.biggestWin, amount),
+          ...(unlocks.length
+            ? {
+                achievements: [...s.achievements, ...unlocks],
+                pendingNotifications: [
+                  ...s.pendingNotifications,
+                  ...unlocks.map(id => ({
+                    id: `ach-${id}-${Date.now()}`,
+                    message: `Achievement unlocked — ${ACHIEVEMENTS_BY_ID[id]?.label ?? id}`,
+                    tone: 'bonus' as const,
+                  })),
+                ],
+              }
+            : {}),
+        }
+      }),
 
       recordLoss: () => set(s => ({
         totalRaces: s.totalRaces + 1,
         currentStreak: 0,
       })),
 
-      unlockAchievement: (id: string) => set(s => ({
-        achievements: s.achievements.includes(id) ? s.achievements : [...s.achievements, id],
-      })),
+      unlockAchievement: (id: string) => set(s => {
+        if (s.achievements.includes(id)) return {}
+        const meta = ACHIEVEMENTS_BY_ID[id]
+        return {
+          achievements: [...s.achievements, id],
+          pendingNotifications: [
+            ...s.pendingNotifications,
+            {
+              id: `ach-${id}-${Date.now()}`,
+              message: `Achievement unlocked — ${meta?.label ?? id}`,
+              tone: 'bonus' as const,
+            },
+          ],
+        }
+      }),
 
       hasAchievement: (id: string) => get().achievements.includes(id),
 
@@ -235,10 +299,27 @@ export const useGameStore = create<GameState & GameActions>()(
     }),
     {
       name: 'photo-finish-game',
+      // Bump on any change to the shape of persisted state. Older saves
+      // get routed through `migrate` below. Without versioning, adding a
+      // field would silently leave returning players in a broken state
+      // (undefineds where arrays/numbers are expected).
+      version: 1,
+      migrate: (persisted: unknown, fromVersion: number) => {
+        // Merge whatever the old save had on top of the current defaults
+        // so any new fields get a sensible starting value instead of
+        // undefined. Prior versions had no `achievements` array or the
+        // new stats (biggestWin / longestStreak) — this fill guarantees
+        // the store is well-formed regardless of save age.
+        const base = INITIAL_STATE as unknown as Record<string, unknown>
+        const saved = (persisted ?? {}) as Record<string, unknown>
+        void fromVersion
+        return { ...base, ...saved }
+      },
       // pendingNotifications is ephemeral UI glue — don't persist it, or a
       // reload would replay stale toasts from a previous session.
       partialize: (s) => {
-        const { pendingNotifications: _pn, ...rest } = s
+        const { pendingNotifications, ...rest } = s
+        void pendingNotifications
         return rest
       },
     }

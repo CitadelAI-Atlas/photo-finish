@@ -2,8 +2,6 @@ import type {
   Bet, Payout, PayoutResult, RaceResult, MarketSnapshot, BetPool, PayoutExplanation, FinishPosition,
 } from './types'
 import {
-  TAKEOUT_WIN, TAKEOUT_PLACE, TAKEOUT_SHOW,
-  TAKEOUT_EXACTA, TAKEOUT_QUINELLA, TAKEOUT_DAILYDOUBLE,
   MIN_PAYOUT_PER_DOLLAR, BREAKAGE_INCREMENT, BET_UNIT,
 } from './types'
 import { quinellaKey } from './market'
@@ -101,7 +99,7 @@ function explainWin(market: MarketSnapshot, winnerIds: string[], selectionId: st
   const k = winnerIds.length
   const poolOnSelection = pool.buckets.get(selectionId) ?? bet.amount  // sole-winner fallback
   const grossPool = pool.totalPool
-  const takeoutRate = TAKEOUT_WIN
+  const takeoutRate = market.takeoutRates.win
   const takeoutAmount = grossPool * takeoutRate
   const netPool = grossPool - takeoutAmount
   const sharedNet = netPool / k
@@ -140,7 +138,7 @@ function explainPlaceOrShow(
 ): PayoutExplanation | null {
   const splitWays = betType === 'place' ? 2 : 3
   const pool = betType === 'place' ? market.placePool : market.showPool
-  const takeoutRate = betType === 'place' ? TAKEOUT_PLACE : TAKEOUT_SHOW
+  const takeoutRate = betType === 'place' ? market.takeoutRates.place : market.takeoutRates.show
   const paidPositions = result.finishOrder.slice(0, splitWays)
   const paidIds = paidPositions.map(p => p.horseId)
   if (!paidIds.includes(selectionId)) return null
@@ -241,7 +239,7 @@ export function resolveBet(
       const [s1, s2] = bet.selections
       const won = winnerIds.length === 1 && s1 === firstId && s2 === secondId
       if (!won) return buildPayout({ bet, exp: null, won: false })
-      const exp = explainComboPool('Exacta', market.exactaPool, TAKEOUT_EXACTA, `${firstId}|${secondId}`, bet)
+      const exp = explainComboPool('Exacta', market.exactaPool, market.takeoutRates.exacta, `${firstId}|${secondId}`, bet)
       return buildPayout({ bet, exp, won: true })
     }
     case 'quinella': {
@@ -249,7 +247,7 @@ export function resolveBet(
       const sels = new Set([s1, s2])
       const won = winnerIds.length === 1 && sels.has(firstId) && sels.has(secondId)
       if (!won) return buildPayout({ bet, exp: null, won: false })
-      const exp = explainComboPool('Quinella', market.quinellaPool, TAKEOUT_QUINELLA, quinellaKey(firstId, secondId), bet)
+      const exp = explainComboPool('Quinella', market.quinellaPool, market.takeoutRates.quinella, quinellaKey(firstId, secondId), bet)
       return buildPayout({ bet, exp, won: true })
     }
     case 'dailyDouble':
@@ -273,7 +271,7 @@ export function resolveDailyDouble(
   const won = sel1 === leg1Winner && sel2 === leg2Winner
   if (!won) return buildPayout({ bet, exp: null, won: false })
   const key = `${leg1Winner}|${leg2Winner}`
-  const exp = explainComboPool('Daily Double', leg1Market.dailyDoublePool, TAKEOUT_DAILYDOUBLE, key, bet)
+  const exp = explainComboPool('Daily Double', leg1Market.dailyDoublePool, leg1Market.takeoutRates.dailyDouble, key, bet)
   return buildPayout({ bet, exp, won: true })
 }
 

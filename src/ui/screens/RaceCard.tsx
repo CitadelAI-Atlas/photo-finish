@@ -1,18 +1,24 @@
 import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import type { Race, MarketSnapshot, BetType, Entry, OddsLine } from '@/engine/types'
+import type { Race, RaceCard as RaceCardType, MarketSnapshot, BetType, Entry, OddsLine } from '@/engine/types'
 import { HorseRow } from '@/ui/components/HorseRow'
 import { HorseDetail } from '@/ui/components/HorseDetail'
 import { BetSlip, type PendingBet } from '@/ui/components/BetSlip'
+import { ToteBoard } from '@/ui/components/ToteBoard'
+import { TooltipChip } from '@/ui/components/TooltipHost'
+import { useTooltipHost } from '@/ui/hooks/useTooltipHost'
+import { useGameStore } from '@/store/gameStore'
 
 interface PendingBetWithSelections extends PendingBet {
   selections: string[]
 }
 
 interface RaceCardProps {
+  card: RaceCardType
   race: Race
   market: MarketSnapshot
   morningLine: OddsLine[]
+  mtpSnapshots: MarketSnapshot[]
   raceIndex: number
   totalRaces: number
   bankroll: number
@@ -21,16 +27,22 @@ interface RaceCardProps {
 }
 
 const SURFACE_LABELS = { D: 'Dirt', T: 'Turf', A: 'Synthetic' } as const
+const SURFACE_TRIGGERS = { D: 'dirt', T: 'turf', A: 'dirt' } as const
 const CLASS_LABELS = { MCL: 'Maiden Claiming', CLM: 'Claiming', ALW: 'Allowance', STK: 'Stakes' } as const
+const CLASS_TRIGGERS = { MCL: 'maiden', CLM: 'claiming', ALW: 'allowance', STK: 'stakes' } as const
 
 export function RaceCard({
-  race, market, morningLine, raceIndex, totalRaces, bankroll, availableBetTypes, onRunRace,
+  card, race, market, morningLine, mtpSnapshots, raceIndex, totalRaces, bankroll, availableBetTypes, onRunRace,
 }: RaceCardProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [secondId, setSecondId] = useState<string | null>(null)
   const [selectingSecond, setSelectingSecond] = useState(false)
   const [inspectingId, setInspectingId] = useState<string | null>(null)
   const [pendingBets, setPendingBets] = useState<PendingBetWithSelections[]>([])
+
+  const seenTooltips = useGameStore(s => s.seenTooltips)
+  const markTooltipSeen = useGameStore(s => s.markTooltipSeen)
+  const tooltip = useTooltipHost({ seenTooltips, markSeen: markTooltipSeen })
 
   const cond = race.conditions
   const activeEntries = race.entries.filter(e => !e.scratched)
@@ -103,9 +115,18 @@ export function RaceCard({
           </div>
         </div>
         <div className="flex gap-3 mt-1 text-xs text-stone-400">
-          <span>{cond.distanceFurlongs}f</span>
-          <span>{SURFACE_LABELS[cond.surface]}</span>
+          <span>
+            {cond.distanceFurlongs}f<TooltipChip trigger="distance" onShow={tooltip.show} />
+          </span>
+          <span>
+            {SURFACE_LABELS[cond.surface]}
+            <TooltipChip trigger={SURFACE_TRIGGERS[cond.surface]} onShow={tooltip.show} />
+          </span>
           <span>{cond.condition}</span>
+          <span>
+            {CLASS_LABELS[cond.raceClass].split(' ')[0]}
+            <TooltipChip trigger={CLASS_TRIGGERS[cond.raceClass]} onShow={tooltip.show} />
+          </span>
           <span>{fieldSize} runners</span>
         </div>
         {/* Pool sizes — demystifies where your payoff comes from. Every
@@ -126,6 +147,35 @@ export function RaceCard({
         </div>
       </div>
 
+      {/* Card-wide preview — a compact strip so the player can see
+          which races are coming and how they differ. The current race
+          is highlighted; past races are dimmed. */}
+      <div className="px-4 pt-3">
+        <div className="flex gap-1.5 overflow-x-auto pb-1">
+          {card.races.map((r, i) => {
+            const isCurrent = i === raceIndex
+            const isPast = i < raceIndex
+            const surf = r.conditions.surface === 'D' ? 'Dirt' : r.conditions.surface === 'T' ? 'Turf' : 'Syn'
+            return (
+              <div
+                key={r.id}
+                className={`shrink-0 rounded border px-2 py-1 text-[10px] font-mono ${
+                  isCurrent
+                    ? 'border-amber-500 bg-amber-100 text-amber-900'
+                    : isPast
+                      ? 'border-stone-200 bg-stone-100 text-stone-400 line-through decoration-1'
+                      : 'border-stone-200 bg-white text-stone-600'
+                }`}
+              >
+                <div className="font-bold">R{r.raceNumber}</div>
+                <div>{r.conditions.raceClass}</div>
+                <div>{r.conditions.distanceFurlongs}f {surf}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
       {selectingSecond && (
         <motion.div
           initial={{ opacity: 0 }}
@@ -134,6 +184,14 @@ export function RaceCard({
         >
           Tap the post # of your second horse
         </motion.div>
+      )}
+
+      {/* Tote board — cycles the MTP ticker so the player can watch the
+          pool fill and odds firm up before post. Stops on FINAL. */}
+      {mtpSnapshots.length > 0 && (
+        <div className="px-4 pt-3">
+          <ToteBoard race={race} snapshots={mtpSnapshots} />
+        </div>
       )}
 
       {/* Field */}
@@ -181,6 +239,10 @@ export function RaceCard({
           needsSecondHorse={selectingSecond}
         />
       </div>
+
+      {/* Tooltip host — mounted at the page root so the popover
+          paints over everything else. */}
+      {tooltip.element}
 
       {/* Horse detail sheet */}
       <AnimatePresence>

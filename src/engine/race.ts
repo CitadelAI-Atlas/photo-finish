@@ -1,9 +1,39 @@
 import type {
   Race, Entry, PaceScenario, RaceResult, FinishPosition, MarginLabel,
 } from './types'
-import { JOCKEYS, JOCKEY_RACE_BONUS } from '@/data/jockeys'
+import { JOCKEYS, JOCKEY_ACTUAL_BONUS } from '@/data/jockeys'
 import { surfaceFitBonus, distanceFitBonus } from './field'
 import type { Rng } from './rng'
+
+// ── Tuning constants ───────────────────────────────────────────
+// All the numeric "knobs" of the race engine live here. Editing any
+// of these changes the feel of the game without touching logic.
+
+// Pace scenario thresholds.
+const HOT_PACE_MIN_EARLY_SPEED = 3       // 3+ E-style horses → hot pace
+const PACE_HOT_E_PENALTY = -6            // speed horses tire in a hot pace
+const PACE_HOT_S_BONUS = +4              // closers benefit from hot pace
+const PACE_SLOW_E_P_BONUS = +4           // soft lead: front-runners & pressers cruise
+const PACE_SLOW_S_PENALTY = -4           // no pace to close into
+
+// Post-position penalty: post 1 = 0, widest post = this value.
+const POST_POSITION_PENALTY_MAX = -2
+
+// Per-race jockey variance, applied on top of tier base. Uniform [-N, +N].
+const JOCKEY_RACE_VARIANCE = 2
+
+// Performance noise — sigma of the normal distribution applied to every
+// horse's final number. ~12 PSR points gives real upsets without chaos.
+const PERFORMANCE_VARIANCE_SIGMA = 12
+
+// Dead-heat threshold: if two (or more) horses finish within this many
+// performance points of the cluster leader, they share the position.
+// Anchored to the cluster leader, not pairwise — see executeRace().
+const DEAD_HEAT_THRESHOLD = 0.1
+
+// Photo finish gap: the winner's margin over 2nd, in performance points.
+// At/under this, the result renders as a photo finish in the UI.
+const PHOTO_FINISH_THRESHOLD = 0.5
 
 // ── Pace Scenario ──────────────────────────────────────────────
 
@@ -11,20 +41,20 @@ export function determinePaceScenario(entries: Entry[]): PaceScenario {
   const active = entries.filter(e => !e.scratched)
   const earlySpeedCount = active.filter(e => e.horse.runningStyle === 'E').length
 
-  if (earlySpeedCount >= 3) return 'hot'
+  if (earlySpeedCount >= HOT_PACE_MIN_EARLY_SPEED) return 'hot'
   if (earlySpeedCount === 0) return 'slow'
   return 'honest'
 }
 
 function paceAdjustment(style: string, scenario: PaceScenario): number {
   if (scenario === 'hot') {
-    if (style === 'E') return -6  // speed horses tire
-    if (style === 'S') return +4  // closers benefit
-    return 0                       // pressers unaffected
+    if (style === 'E') return PACE_HOT_E_PENALTY
+    if (style === 'S') return PACE_HOT_S_BONUS
+    return 0
   }
   if (scenario === 'slow') {
-    if (style === 'E' || style === 'P') return +4  // soft lead
-    if (style === 'S') return -4                     // no pace to close into
+    if (style === 'E' || style === 'P') return PACE_SLOW_E_P_BONUS
+    if (style === 'S') return PACE_SLOW_S_PENALTY
     return 0
   }
   return 0 // honest pace — no adjustments
@@ -33,16 +63,15 @@ function paceAdjustment(style: string, scenario: PaceScenario): number {
 // ── Performance Calculation ────────────────────────────────────
 
 function postPositionPenalty(pp: number, fieldSize: number): number {
-  // Linear interpolation: post 1 = 0, widest post = -2
   if (fieldSize <= 1) return 0
-  return -2 * ((pp - 1) / (fieldSize - 1))
+  return POST_POSITION_PENALTY_MAX * ((pp - 1) / (fieldSize - 1))
 }
 
 function jockeyRaceBonus(jockeyId: string, rng: Rng): number {
   const jockey = JOCKEYS.find(j => j.id === jockeyId)
   if (!jockey) return 0
-  const base = JOCKEY_RACE_BONUS[jockey.tier] ?? 0
-  const variance = rng.next() * 4 - 2  // random(-2, +2)
+  const base = JOCKEY_ACTUAL_BONUS[jockey.tier] ?? 0
+  const variance = rng.next() * (JOCKEY_RACE_VARIANCE * 2) - JOCKEY_RACE_VARIANCE
   return base + variance
 }
 
@@ -65,6 +94,7 @@ export function calculatePerformance(
 
   const quirkAdj = h.quirk
     ? h.quirk.effect({
+        rng,
         surface: cond.surface,
         condition: cond.condition,
         fieldSize,
@@ -72,7 +102,7 @@ export function calculatePerformance(
       })
     : 0
 
-  const variance = rng.normal(0, 12)
+  const variance = rng.normal(0, PERFORMANCE_VARIANCE_SIGMA)
 
   return base + pace + surface + distance + jockey + post + quirkAdj + variance
 }
@@ -132,7 +162,6 @@ export function executeRace(rng: Rng, race: Race): RaceResult {
   // 3-way dead heat for win produces three "1st place" finishers and the
   // next horse is 4th (not 2nd). That matters for payouts: the Place pool
   // pays all three as winners, each at a 1/3 slice.
-  const DH_THRESHOLD = 0.1
   let deadHeat = false
   let i = 0
   while (i < finishOrder.length) {
@@ -140,7 +169,7 @@ export function executeRace(rng: Rng, race: Race): RaceResult {
     let j = i + 1
     while (
       j < finishOrder.length &&
-      Math.abs(anchor - finishOrder[j]!.performance) <= DH_THRESHOLD
+      Math.abs(anchor - finishOrder[j]!.performance) <= DEAD_HEAT_THRESHOLD
     ) {
       j++
     }
@@ -157,9 +186,8 @@ export function executeRace(rng: Rng, race: Race): RaceResult {
     i = j
   }
 
-  // Check for photo finish (within 0.5 points between 1st and 2nd)
   const photoFinish = finishOrder.length >= 2 &&
-    Math.abs(finishOrder[0]!.performance - finishOrder[1]!.performance) <= 0.5
+    Math.abs(finishOrder[0]!.performance - finishOrder[1]!.performance) <= PHOTO_FINISH_THRESHOLD
 
   return {
     raceId: race.id,

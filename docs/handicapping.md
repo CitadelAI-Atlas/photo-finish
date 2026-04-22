@@ -65,7 +65,7 @@ pay big when conditions match and bomb when they don't.
 ## Jockey tier
 
 Three tiers — A (top 15%), B (middle 60%), C (bottom 25%). Bonus
-lookup in `JOCKEY_RACE_BONUS`. Each race, the jockey's contribution
+lookup in `JOCKEY_ACTUAL_BONUS`. Each race, the jockey's contribution
 is `baseBonus + uniform(-2, +2)` — good days and bad days happen.
 
 ## Post position

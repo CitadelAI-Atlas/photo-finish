@@ -6,7 +6,7 @@ import { formatOdds } from '@/engine/odds'
 interface ToteBoardProps {
   race: Race
   snapshots: MarketSnapshot[]
-  onComplete: () => void
+  onComplete?: () => void
 }
 
 const MTP_LABELS = ['MTP 5:00', 'MTP 3:00', 'MTP 1:00', 'FINAL']
@@ -17,8 +17,11 @@ export function ToteBoard({ race, snapshots, onComplete }: ToteBoardProps) {
 
   useEffect(() => {
     if (snapshotIdx >= snapshots.length - 1) {
-      const timer = setTimeout(onComplete, 1500)
-      return () => clearTimeout(timer)
+      if (onComplete) {
+        const timer = setTimeout(onComplete, 1500)
+        return () => clearTimeout(timer)
+      }
+      return
     }
     const timer = setTimeout(() => setSnapshotIdx(i => i + 1), 2000)
     return () => clearTimeout(timer)

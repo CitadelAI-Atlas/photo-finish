@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
-import type { Race, RaceCard, MarketSnapshot, RaceResult, Bet, PayoutResult, RaceRecap, OddsLine } from '@/engine/types'
+import type { Race, RaceCard, MarketSnapshot, RaceResult, Bet, PayoutResult, RaceRecap, OddsLine, TakeoutRates } from '@/engine/types'
+import { DEFAULT_TAKEOUT_RATES } from '@/engine/types'
 import { useGameStore } from '@/store/gameStore'
 import { generateCard } from '@/engine/field'
 import { buildMarketSnapshot, generateMTPSnapshots, generateMorningLine } from '@/engine/market'
@@ -8,6 +9,11 @@ import { resolveRace, resolveDailyDouble, refundBet } from '@/engine/payout'
 import { buildRecap } from '@/engine/recap'
 import { createRng } from '@/engine/rng'
 import type { Rng } from '@/engine/rng'
+import { TRACKS } from '@/data/tracks'
+
+function getTakeout(trackCode: string): TakeoutRates {
+  return TRACKS.find(t => t.code === trackCode)?.takeout ?? DEFAULT_TAKEOUT_RATES
+}
 
 export type Screen = 'home' | 'raceCard' | 'raceView' | 'results'
 
@@ -38,9 +44,10 @@ interface OpenDailyDouble {
 // A single RNG threaded through every call keeps a card reproducible
 // from one seed — useful for replay, debugging, and tests.
 function buildRaceView(rng: Rng, race: Race, nextRace: Race | undefined) {
-  const market = buildMarketSnapshot(rng, race, nextRace)
+  const takeout = getTakeout(race.trackCode)
+  const market = buildMarketSnapshot(rng, race, nextRace, takeout)
   const morningLine = generateMorningLine(rng, race)
-  const mtpSnapshots = generateMTPSnapshots(rng, race, nextRace)
+  const mtpSnapshots = generateMTPSnapshots(rng, race, nextRace, takeout)
   return { market, morningLine, mtpSnapshots }
 }
 
@@ -177,6 +184,24 @@ export function useGameFlow() {
     } else {
       store.recordLoss()
     }
+
+    // Context-rich achievements — signals only available at resolution
+    // time (bet type, odds on the winning selection, photo finish flag).
+    const winningPayouts = payoutResult.payouts.filter(p => p.won)
+    if (winningPayouts.some(p => p.betType === 'place' || p.betType === 'show')) {
+      store.unlockAchievement('inTheMoney')
+    }
+    for (const p of winningPayouts) {
+      if (p.betType !== 'win') continue
+      const selection = straightBets.find(b => b.type === 'win')?.selections[0]
+      if (!selection) continue
+      const odds = market.oddsByHorse.get(selection)?.odds ?? 0
+      if (odds >= 10) store.unlockAchievement('giantKiller')
+    }
+    if (result.photoFinish && winningPayouts.length > 0) {
+      store.unlockAchievement('photoFinish')
+    }
+
     store.checkProgression()
 
     setState(prev => ({
@@ -221,6 +246,25 @@ export function useGameFlow() {
     setState(prev => ({ ...prev, screen: 'home' }))
   }, [])
 
+  const resetGame = useCallback(() => {
+    store.resetGame()
+    rngRef.current = createRng()
+    openDDRef.current = []
+    setState({
+      screen: 'home',
+      card: null,
+      currentRace: null,
+      market: null,
+      morningLine: [],
+      mtpSnapshots: [],
+      result: null,
+      payoutResult: null,
+      recap: null,
+      playerBets: [],
+      playerHorseId: null,
+    })
+  }, [store])
+
   return {
     ...state,
     bankroll: store.bankroll,
@@ -228,6 +272,9 @@ export function useGameFlow() {
     currentRaceIndex: store.currentRaceIndex,
     totalRaces: store.totalRaces,
     totalWins: store.totalWins,
+    biggestWin: store.biggestWin,
+    longestStreak: store.longestStreak,
+    currentStreak: store.currentStreak,
     achievements: store.achievements,
     seenTooltips: store.seenTooltips,
     availableBetTypes: store.getAvailableBetTypes(),
@@ -236,6 +283,7 @@ export function useGameFlow() {
     resolveCurrentRace,
     nextRace,
     goHome,
+    resetGame,
     markTooltipSeen: store.markTooltipSeen,
     markLessonSeen: store.markLessonSeen,
     unlockAchievement: store.unlockAchievement,

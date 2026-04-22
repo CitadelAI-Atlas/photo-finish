@@ -27,9 +27,23 @@ export function Results({
   const netProfit = payoutResult.totalReturn - totalWagered
 
   return (
-    <div className="min-h-screen bg-amber-50 pb-6">
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-b from-amber-100 via-amber-50 to-stone-50 pb-6">
+      {/* Subtle grandstand silhouette behind the header — adds depth
+          without competing with content. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-32 opacity-20"
+        style={{
+          backgroundImage:
+            'repeating-linear-gradient(90deg, rgba(41,37,36,0.25) 0 2px, transparent 2px 8px)',
+        }}
+      />
       {/* Header */}
-      <div className={`px-4 py-4 ${netProfit > 0 ? 'bg-green-700' : 'bg-stone-700'} text-white`}>
+      <div
+        className={`relative px-4 py-4 text-white shadow-inner ${
+          netProfit > 0 ? 'bg-gradient-to-r from-green-700 via-green-600 to-green-700' : 'bg-gradient-to-r from-stone-800 via-stone-700 to-stone-800'
+        }`}
+      >
         <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
           <p className="text-xs font-bold uppercase tracking-widest opacity-70">
             {result.photoFinish ? 'Photo Finish!' : 'Official Results'}

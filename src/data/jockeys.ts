@@ -28,13 +28,20 @@ export const JOCKEYS: Jockey[] = [
   { id: 'j20', name: 'Silvestre Gonzalez', tier: 'C' },
 ]
 
-export const JOCKEY_BONUS: Record<string, number> = {
+// What the handicapper/crowd THINKS a jockey is worth — used only for
+// perceived PSR when computing the morning line. This is the "public
+// estimate" of jockey value and is allowed to be slightly generous, the
+// way popular jockeys are overbet in real life.
+export const JOCKEY_PERCEIVED_BONUS: Record<string, number> = {
   A: 5,
   B: 2,
   C: 0,
 }
 
-export const JOCKEY_RACE_BONUS: Record<string, number> = {
+// What the jockey is ACTUALLY worth during the race, applied on top of
+// performance. Intentionally smaller than perceived — the gap between
+// these two values is the "overlay" on under-jockeyed horses.
+export const JOCKEY_ACTUAL_BONUS: Record<string, number> = {
   A: 3,
   B: 1,
   C: 0,

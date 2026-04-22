@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { TRACKS } from '@/data/tracks'
 import { PROGRESSION_TIERS } from '@/engine/types'
@@ -19,23 +20,45 @@ interface HomeProps {
   currentTier: number
   totalRaces: number
   totalWins: number
+  biggestWin: number
+  longestStreak: number
   onStartCard: (trackCode: string) => void
+  onReset: () => void
 }
 
-export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard }: HomeProps) {
+export function Home({
+  bankroll, currentTier, totalRaces, totalWins,
+  biggestWin, longestStreak, onStartCard, onReset,
+}: HomeProps) {
   const tier = PROGRESSION_TIERS[currentTier]!
   const availableTracks = TRACKS.slice(0, tier.tracks)
   const nextTier = PROGRESSION_TIERS[currentTier + 1]
+  const [confirmReset, setConfirmReset] = useState(false)
 
   return (
-    <div className="min-h-screen bg-amber-50 px-4 py-6">
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-b from-amber-100 via-amber-50 to-stone-50 px-4 py-6">
+      {/* Faint rail-texture hint — sits behind content so the page
+          reads as "the paddock" rather than an empty page. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-40 opacity-40"
+        style={{
+          backgroundImage:
+            'repeating-linear-gradient(90deg, transparent 0 24px, rgba(120,53,15,0.06) 24px 25px)',
+        }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-stone-200/60 to-transparent"
+      />
+
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="text-center mb-8"
+        className="relative text-center mb-8"
       >
-        <h1 className="text-4xl font-bold tracking-tight text-stone-900">Shrug Analytics</h1>
+        <h1 className="text-4xl font-bold tracking-tight text-stone-900 drop-shadow-sm">Photo Finish</h1>
         <p className="text-stone-500 mt-1">At the Track</p>
       </motion.div>
 
@@ -44,7 +67,7 @@ export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ delay: 0.1 }}
-        className="rounded-xl border-2 border-stone-300 bg-white p-4 mb-6 text-center"
+        className="relative rounded-xl border-2 border-stone-300 bg-white p-4 mb-6 text-center shadow-sm"
       >
         <p className="text-xs font-bold uppercase tracking-widest text-stone-400">Bankroll</p>
         <p className="text-4xl font-mono font-bold text-stone-900 mt-1">
@@ -59,22 +82,36 @@ export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard
 
       {/* Stats */}
       {totalRaces > 0 && (
-        <div className="flex gap-3 mb-6">
-          <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
-            <p className="text-2xl font-mono font-bold text-stone-900">{totalRaces}</p>
-            <p className="text-[10px] uppercase tracking-wider text-stone-400">Races</p>
+        <>
+          <div className="flex gap-3 mb-3">
+            <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
+              <p className="text-2xl font-mono font-bold text-stone-900">{totalRaces}</p>
+              <p className="text-[10px] uppercase tracking-wider text-stone-400">Races</p>
+            </div>
+            <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
+              <p className="text-2xl font-mono font-bold text-stone-900">{totalWins}</p>
+              <p className="text-[10px] uppercase tracking-wider text-stone-400">Wins</p>
+            </div>
+            <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
+              <p className="text-2xl font-mono font-bold text-stone-900">
+                {`${((totalWins / totalRaces) * 100).toFixed(0)}%`}
+              </p>
+              <p className="text-[10px] uppercase tracking-wider text-stone-400">Win Rate</p>
+            </div>
           </div>
-          <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
-            <p className="text-2xl font-mono font-bold text-stone-900">{totalWins}</p>
-            <p className="text-[10px] uppercase tracking-wider text-stone-400">Wins</p>
+          <div className="flex gap-3 mb-6">
+            <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
+              <p className="text-2xl font-mono font-bold text-stone-900">
+                {biggestWin > 0 ? `$${biggestWin.toFixed(0)}` : '--'}
+              </p>
+              <p className="text-[10px] uppercase tracking-wider text-stone-400">Best Payout</p>
+            </div>
+            <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
+              <p className="text-2xl font-mono font-bold text-stone-900">{longestStreak}</p>
+              <p className="text-[10px] uppercase tracking-wider text-stone-400">Best Streak</p>
+            </div>
           </div>
-          <div className="flex-1 rounded-lg border border-stone-200 bg-white p-3 text-center">
-            <p className="text-2xl font-mono font-bold text-stone-900">
-              {totalRaces > 0 ? `${((totalWins / totalRaces) * 100).toFixed(0)}%` : '--'}
-            </p>
-            <p className="text-[10px] uppercase tracking-wider text-stone-400">Win Rate</p>
-          </div>
-        </div>
+        </>
       )}
 
       {/* How to Play */}
@@ -166,6 +203,34 @@ export function Home({ bankroll, currentTier, totalRaces, totalWins, onStartCard
           ))}
         </div>
       )}
+
+      {/* Reset — two-step confirm so it's not a one-tap footgun. */}
+      <div className="mt-8 pb-6 text-center">
+        {confirmReset ? (
+          <div className="inline-flex items-center gap-2">
+            <span className="text-xs text-stone-500">Erase all progress?</span>
+            <button
+              onClick={() => { onReset(); setConfirmReset(false) }}
+              className="rounded border border-red-400 bg-red-50 px-3 py-1 text-xs font-bold uppercase tracking-wide text-red-700 hover:bg-red-100"
+            >
+              Yes, reset
+            </button>
+            <button
+              onClick={() => setConfirmReset(false)}
+              className="rounded border border-stone-300 bg-white px-3 py-1 text-xs font-bold uppercase tracking-wide text-stone-600 hover:bg-stone-100"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmReset(true)}
+            className="text-[11px] uppercase tracking-wider text-stone-400 hover:text-stone-600 underline underline-offset-4"
+          >
+            Reset Game
+          </button>
+        )}
+      </div>
     </div>
   )
 }

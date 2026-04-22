@@ -1,8 +1,18 @@
 import { motion } from 'framer-motion'
 import type { Entry, OddsLine, RaceConditions } from '@/engine/types'
-import { JOCKEYS } from '@/data/jockeys'
+import { JOCKEYS, JOCKEY_PERCEIVED_BONUS } from '@/data/jockeys'
 import { surfaceFitBonus, distanceFitBonus } from '@/engine/field'
 import { formatOdds } from '@/engine/odds'
+import { Rng } from '@/engine/rng'
+
+// Deterministic seed so a horse's preview effect doesn't flicker on
+// re-render. Real race-day RNG is a separate stream; this is just for
+// the pre-race handicapping card.
+function seedFromId(id: string): number {
+  let h = 2166136261
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619)
+  return h >>> 0
+}
 
 interface HorseDetailProps {
   entry: Entry
@@ -66,9 +76,9 @@ export function HorseDetail({ entry, oddsLine, isFavorite, conditions, fieldSize
   // Compute handicapping factors
   const surfFit = surfaceFitBonus(h, conditions.surface)
   const distFit = distanceFitBonus(h, conditions.distanceCategory)
-  const jockeyBonus = jockey ? ({ A: 5, B: 2, C: 0 }[jockey.tier] ?? 0) : 0
+  const jockeyBonus = jockey ? (JOCKEY_PERCEIVED_BONUS[jockey.tier] ?? 0) : 0
   const quirkEffect = h.quirk
-    ? h.quirk.effect({ surface: conditions.surface, condition: conditions.condition, fieldSize, postPosition: entry.postPosition })
+    ? h.quirk.effect({ rng: new Rng(seedFromId(h.id)), surface: conditions.surface, condition: conditions.condition, fieldSize, postPosition: entry.postPosition })
     : 0
 
   // PSR bar — normalize against 0-120 range

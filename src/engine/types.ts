@@ -1,3 +1,5 @@
+import type { Rng } from './rng'
+
 // ── Horse Identity ──────────────────────────────────────────────
 
 export type Sex = 'G' | 'M' | 'F' | 'C' | 'H'
@@ -17,6 +19,7 @@ export interface Quirk {
 }
 
 export interface QuirkContext {
+  rng: Rng                // quirks with stochastic effects must roll from the seeded RNG
   surface: Surface
   condition: TrackCondition
   fieldSize: number
@@ -55,11 +58,26 @@ export type TrackCondition =
   | 'FT' | 'GD' | 'SY' | 'MY' | 'WF' | 'SL' | 'HY'  // Dirt
   | 'FM' | 'YL' | 'SF'                                    // Turf (GD/HY shared)
 
+// Real US tracks negotiate their own takeout rates with state
+// regulators. We model this per-track so the UI can show a player
+// WHY two tracks with identical pool sizes pay differently. Defaults
+// in DEFAULT_TAKEOUT_RATES apply when a snapshot is built without
+// a track context (e.g. isolated unit tests).
+export interface TakeoutRates {
+  win: number
+  place: number
+  show: number
+  exacta: number
+  quinella: number
+  dailyDouble: number
+}
+
 export interface Track {
   code: string
   name: string
   city: string
   surfaces: Surface[]
+  takeout: TakeoutRates
 }
 
 // ── Race ───────────────────────────────────────────────────────
@@ -137,6 +155,9 @@ export interface MarketSnapshot {
   quinellaPool: BetPool
   dailyDoublePool: BetPool | null     // only present on leg 1 of a DD
 
+  // Per-track takeout applied when pools pay out
+  takeoutRates: TakeoutRates
+
   // Derived display from Win pool (odds shown on tote board)
   odds: OddsLine[]
   oddsByHorse: Map<string, OddsLine>  // O(1) lookup for hot paths
@@ -167,14 +188,11 @@ export interface RaceResult {
 
 export type BetType = 'win' | 'place' | 'show' | 'exacta' | 'quinella' | 'dailyDouble'
 
-export type BetStatus = 'open' | 'resolved' | 'refunded'
-
 export interface Bet {
   type: BetType
   amount: number
   selections: string[]  // horseId(s) — 1 for W/P/S, 2 for exacta/quinella, 2 for DD (leg1, leg2)
   raceId: string        // for DD, this is leg 1's raceId
-  status?: BetStatus    // optional so legacy callers still work; defaults to 'open'
 }
 
 // Attached to every Payout so the UI can explain HOW the number was reached.
@@ -247,12 +265,17 @@ export const PROGRESSION_TIERS: ProgressionTier[] = [
 // exotics cost more because the tracks/associations need bigger slices
 // of smaller pools to operate them.
 
-export const TAKEOUT_WIN = 0.16
-export const TAKEOUT_PLACE = 0.16
-export const TAKEOUT_SHOW = 0.16
-export const TAKEOUT_EXACTA = 0.20
-export const TAKEOUT_QUINELLA = 0.20
-export const TAKEOUT_DAILYDOUBLE = 0.20
+// Fallback takeout rates (mid-range US values). Used when a market
+// snapshot is built without a track (e.g. unit tests); real gameplay
+// always threads the host track's rates.
+export const DEFAULT_TAKEOUT_RATES: TakeoutRates = {
+  win: 0.16,
+  place: 0.16,
+  show: 0.16,
+  exacta: 0.20,
+  quinella: 0.20,
+  dailyDouble: 0.20,
+}
 
 // Minimum payout floor, enshrined in US racing: a winning $2 ticket
 // must return at least $2.10 (a nickel profit per dollar). Comes from
