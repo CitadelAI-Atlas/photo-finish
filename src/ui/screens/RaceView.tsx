@@ -45,6 +45,32 @@ const SILK_COLORS = [
   '#d97706', '#7c3aed',
 ]
 
+// Track-standard saddle-cloth colors. Real US thoroughbred racing assigns
+// these by post position so the betting public can identify a horse from
+// the rail by the cloth alone, not by name. Numbers >12 reuse the cycle
+// (real tracks use white-on-color plates for 13+; we approximate).
+const PP_COLORS: { bg: string; fg: string }[] = [
+  { bg: '#dc2626', fg: '#fff' },  // 1 red
+  { bg: '#f5f5f4', fg: '#111' },  // 2 white
+  { bg: '#1d4ed8', fg: '#fff' },  // 3 blue
+  { bg: '#facc15', fg: '#111' },  // 4 yellow
+  { bg: '#15803d', fg: '#fff' },  // 5 green
+  { bg: '#111111', fg: '#fff' },  // 6 black
+  { bg: '#ea580c', fg: '#fff' },  // 7 orange
+  { bg: '#ec4899', fg: '#111' },  // 8 pink
+  { bg: '#0891b2', fg: '#fff' },  // 9 turquoise
+  { bg: '#7c3aed', fg: '#fff' },  // 10 purple
+  { bg: '#78716c', fg: '#fff' },  // 11 gray
+  { bg: '#84cc16', fg: '#111' },  // 12 lime
+]
+
+function ppColor(pp: number): { bg: string; fg: string } {
+  return PP_COLORS[(pp - 1) % PP_COLORS.length]!
+}
+
+type SilkPattern = 'solid' | 'sash' | 'stripes' | 'quartered' | 'diamond'
+const SILK_PATTERNS: SilkPattern[] = ['solid', 'sash', 'stripes', 'quartered', 'diamond']
+
 // Deterministic silk permutation for a given race. Without this every
 // field would show post 1 in red, post 2 in blue, etc. — the same
 // visual signature race after race. Fisher-Yates seeded off the race
@@ -66,6 +92,19 @@ function shuffledSilks(raceId: string): string[] {
     const tmp = out[i]!; out[i] = out[j]!; out[j] = tmp
   }
   return out
+}
+
+function silksFor(raceId: string, idx: number): {
+  primary: string; secondary: string; pattern: SilkPattern
+} {
+  const colors = shuffledSilks(raceId)
+  const primary = colors[idx % colors.length]!
+  // Offset secondary so it rarely matches primary; bump if collision.
+  let secondary = colors[(idx + 5) % colors.length]!
+  if (secondary === primary) secondary = colors[(idx + 7) % colors.length]!
+  const seed = seedFromString(raceId + ':' + idx)
+  const pattern = SILK_PATTERNS[seed % SILK_PATTERNS.length]!
+  return { primary, secondary, pattern }
 }
 
 // ── Track geometry ─────────────────────────────────────────────
@@ -148,7 +187,9 @@ function trackPoint(t: number, geo: TrackGeo, laneOff: number): { x: number; y: 
 interface HorseState {
   id: string; name: string; pp: number
   targetT: number; currentT: number; lane: number
-  isPlayer: boolean; color: string; style: string; gallop: number
+  isPlayer: boolean
+  silkPrimary: string; silkSecondary: string; silkPattern: SilkPattern
+  style: string; gallop: number
 }
 
 // ── Drawing: track ─────────────────────────────────────────────
@@ -221,22 +262,26 @@ function drawTrack(ctx: CanvasRenderingContext2D, geo: TrackGeo, surface: string
 function drawHorse(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, angle: number,
-  color: string, isPlayer: boolean,
+  silkPrimary: string, silkSecondary: string, pattern: SilkPattern,
+  isPlayer: boolean,
   gallop: number, pp: number, moving: boolean, s: number,
 ) {
   ctx.save()
   ctx.translate(x, y)
   ctx.rotate(angle)
 
-  const bob = moving ? Math.sin(gallop) * 1.5 * s : 0
+  // Body bob and head nod are driven separately so the head leads the
+  // body slightly (real horses bob their heads down on the foreleg landing).
+  const bob = moving ? Math.sin(gallop) * 1.8 * s : 0
+  const headNod = moving ? Math.sin(gallop + Math.PI * 0.25) * 1.1 * s : 0
 
   // Body
   ctx.fillStyle = '#5c3d2e'
   ctx.beginPath(); ctx.ellipse(0, bob, 8 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill()
-  // Neck + head
-  ctx.beginPath(); ctx.ellipse(8 * s, -2 * s + bob, 4 * s, 2.5 * s, -0.5, 0, Math.PI * 2); ctx.fill()
-  ctx.beginPath(); ctx.ellipse(12 * s, -3.5 * s + bob, 3 * s, 2 * s, -0.3, 0, Math.PI * 2); ctx.fill()
-  ctx.beginPath(); ctx.ellipse(13 * s, -5.5 * s + bob, 1 * s, 1.5 * s, -0.2, 0, Math.PI * 2); ctx.fill()
+  // Neck + head (with extra nod on top of body bob)
+  ctx.beginPath(); ctx.ellipse(8 * s, -2 * s + bob + headNod * 0.4, 4 * s, 2.5 * s, -0.5, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.ellipse(12 * s, -3.5 * s + bob + headNod, 3 * s, 2 * s, -0.3, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.ellipse(13 * s, -5.5 * s + bob + headNod, 1 * s, 1.5 * s, -0.2, 0, Math.PI * 2); ctx.fill()
 
   // Legs
   ctx.strokeStyle = '#4a3020'; ctx.lineWidth = 1.5 * s
@@ -257,17 +302,27 @@ function drawHorse(
   ctx.beginPath(); ctx.moveTo(-8 * s, bob)
   ctx.quadraticCurveTo(-12 * s, -3 * s + ts + bob, -13 * s, 1 * s + ts + bob); ctx.stroke()
 
-  // Jockey silks
-  ctx.fillStyle = color
-  ctx.beginPath(); ctx.ellipse(1 * s, -3 * s + bob, 3.5 * s, 2.5 * s, 0, 0, Math.PI * 2); ctx.fill()
-  ctx.fillStyle = '#f5deb3'
-  ctx.beginPath(); ctx.arc(3 * s, -5.5 * s + bob, 2 * s, 0, Math.PI * 2); ctx.fill()
-  ctx.fillStyle = color
-  ctx.beginPath(); ctx.arc(3 * s, -6 * s + bob, 2 * s, Math.PI, 0); ctx.fill()
+  // Saddle cloth — track-standard PP color sits on the rump, behind the
+  // jockey. This is the piece a railside fan reads to identify a horse.
+  const pc = ppColor(pp)
+  ctx.save()
+  ctx.fillStyle = pc.bg
+  ctx.beginPath(); ctx.ellipse(-2 * s, -2 * s + bob, 3.6 * s, 2.4 * s, 0, 0, Math.PI * 2); ctx.fill()
+  ctx.fillStyle = pc.fg
+  ctx.font = `bold ${Math.max(6, 7 * s)}px monospace`
+  ctx.textAlign = 'center'
+  ctx.fillText(String(pp), -2 * s, -0.5 * s + bob)
+  ctx.restore()
 
-  // PP number
-  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(6, 7 * s)}px monospace`
-  ctx.textAlign = 'center'; ctx.fillText(String(pp), 1 * s, -1.5 * s + bob)
+  // Jockey silks with pattern. Crouch sinusoid translates the upper body
+  // forward/back per stride to read as the rider's pumping motion.
+  const crouch = moving ? Math.sin(gallop + Math.PI * 0.5) * 0.6 * s : 0
+  drawSilksTopDown(ctx, 1 * s + crouch, -3 * s + bob, 3.5 * s, 2.5 * s, silkPrimary, silkSecondary, pattern)
+  // Jockey head + helmet
+  ctx.fillStyle = '#f5deb3'
+  ctx.beginPath(); ctx.arc(3 * s + crouch, -5.5 * s + bob, 2 * s, 0, Math.PI * 2); ctx.fill()
+  ctx.fillStyle = silkPrimary
+  ctx.beginPath(); ctx.arc(3 * s + crouch, -6 * s + bob, 2 * s, Math.PI, 0); ctx.fill()
 
   // Player ring
   if (isPlayer) {
@@ -275,6 +330,52 @@ function drawHorse(
     ctx.beginPath(); ctx.ellipse(0, bob, 14 * s, 10 * s, 0, 0, Math.PI * 2); ctx.stroke()
   }
 
+  ctx.restore()
+}
+
+// Draw an elliptical jockey-silks region with one of five patterns.
+// Fully clipped to the ellipse so the secondary color never bleeds out.
+function drawSilksTopDown(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number, rx: number, ry: number,
+  primary: string, secondary: string, pattern: SilkPattern,
+) {
+  ctx.save()
+  ctx.beginPath()
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+  ctx.clip()
+  ctx.fillStyle = primary
+  ctx.fillRect(cx - rx, cy - ry, rx * 2, ry * 2)
+  ctx.fillStyle = secondary
+  switch (pattern) {
+    case 'solid':
+      break
+    case 'sash':
+      ctx.beginPath()
+      ctx.moveTo(cx - rx, cy + ry * 0.2)
+      ctx.lineTo(cx - rx, cy + ry * 0.6)
+      ctx.lineTo(cx + rx, cy - ry * 0.6)
+      ctx.lineTo(cx + rx, cy - ry * 0.2)
+      ctx.closePath(); ctx.fill()
+      break
+    case 'stripes':
+      for (let i = -2; i <= 2; i += 2) {
+        ctx.fillRect(cx - rx, cy + i * ry * 0.3, rx * 2, ry * 0.3)
+      }
+      break
+    case 'quartered':
+      ctx.fillRect(cx - rx, cy - ry, rx, ry)
+      ctx.fillRect(cx, cy, rx, ry)
+      break
+    case 'diamond':
+      ctx.beginPath()
+      ctx.moveTo(cx, cy - ry * 0.7)
+      ctx.lineTo(cx + rx * 0.7, cy)
+      ctx.lineTo(cx, cy + ry * 0.7)
+      ctx.lineTo(cx - rx * 0.7, cy)
+      ctx.closePath(); ctx.fill()
+      break
+  }
   ctx.restore()
 }
 
@@ -334,25 +435,34 @@ function lerpCam(a: Cam, b: Cam, t: number): Cam {
   return { tx: a.tx + (b.tx - a.tx) * e, ty: a.ty + (b.ty - a.ty) * e, s: a.s + (b.s - a.s) * e }
 }
 
-// ── Name labels ────────────────────────────────────────────────
+// ── PP chips ───────────────────────────────────────────────────
+// Above each horse on top-down views: a small post-position-color
+// rounded square with the PP number. Replaces name plates so the
+// field reads like a real broadcast (you watch numbers, not names).
 
-function drawLabels(ctx: CanvasRenderingContext2D, horses: HorseState[], geo: TrackGeo, laneW: number, invScale: number) {
-  const fs = Math.max(7, Math.round(8 * invScale))
+function drawCloths(ctx: CanvasRenderingContext2D, horses: HorseState[], geo: TrackGeo, laneW: number, invScale: number) {
+  const fs = Math.max(8, Math.round(9 * invScale))
   ctx.save()
-  ctx.font = `bold ${fs}px sans-serif`
+  ctx.font = `bold ${fs}px monospace`
   ctx.textAlign = 'center'
 
   for (const horse of horses) {
     const lo = -geo.tw / 2 + (horse.lane + 1) * laneW
     const pt = trackPoint(horse.currentT % 1, geo, lo)
-    const name = horse.name.length > 10 ? horse.name.slice(0, 9) + '\u2026' : horse.name
-    const tw = ctx.measureText(name).width + 6
-    const ly = pt.y - 16 * invScale
+    const pc = ppColor(horse.pp)
+    const sz = fs + 6
+    const ly = pt.y - 14 * invScale
 
-    ctx.fillStyle = horse.isPlayer ? 'rgba(251,191,36,0.9)' : 'rgba(0,0,0,0.6)'
-    ctx.beginPath(); ctx.roundRect(pt.x - tw / 2, ly - fs / 2 - 1, tw, fs + 3, 3); ctx.fill()
-    ctx.fillStyle = horse.isPlayer ? '#1c1917' : '#fff'
-    ctx.fillText(name, pt.x, ly + fs / 2 - 1)
+    // Chip
+    ctx.fillStyle = pc.bg
+    ctx.beginPath(); ctx.roundRect(pt.x - sz / 2, ly - sz / 2, sz, sz, 2); ctx.fill()
+    if (horse.isPlayer) {
+      ctx.strokeStyle = '#fbbf24'
+      ctx.lineWidth = Math.max(1, 1.5 * invScale)
+      ctx.beginPath(); ctx.roundRect(pt.x - sz / 2, ly - sz / 2, sz, sz, 2); ctx.stroke()
+    }
+    ctx.fillStyle = pc.fg
+    ctx.fillText(String(horse.pp), pt.x, ly + fs / 2 - 1)
   }
   ctx.restore()
 }
@@ -422,10 +532,90 @@ function drawGrandstand(ctx: CanvasRenderingContext2D, w: number, h: number) {
   }
 }
 
+// Fraction of the rail-cam phase at which the leader's nose hits the
+// finish wire. Lifted to module scope so the camera shake at the wire
+// crossing can be triggered from outside drawSideView.
+const WIRE_HIT_AT = 0.55
+// Duration of the photo-finish freeze frame in ms. Long enough to
+// register as a deliberate broadcast beat, short enough that the user
+// doesn't feel the run pausing.
+const FREEZE_MS = 700
+
+// Film-grain + "PHOTO" stamp drawn on top of the frozen rail-cam
+// during a photo finish. now is used to tick the grain noise so the
+// overlay shimmers like real broadcast film grain.
+function drawPhotoFinishOverlay(ctx: CanvasRenderingContext2D, w: number, h: number, now: number) {
+  ctx.save()
+  // Grain noise
+  ctx.globalAlpha = 0.18
+  for (let i = 0; i < 220; i++) {
+    const seed = (i * 9301 + Math.floor(now / 33)) | 0
+    const gx = (Math.abs(seed * 31) % Math.floor(w))
+    const gy = (Math.abs(seed * 71) % Math.floor(h))
+    ctx.fillStyle = i % 2 === 0 ? '#fff' : '#000'
+    ctx.fillRect(gx, gy, 1, 1)
+  }
+  ctx.globalAlpha = 1
+
+  // Vignette darken
+  const vig = ctx.createRadialGradient(w / 2, h / 2, h * 0.3, w / 2, h / 2, h * 0.7)
+  vig.addColorStop(0, 'rgba(0,0,0,0)')
+  vig.addColorStop(1, 'rgba(0,0,0,0.55)')
+  ctx.fillStyle = vig
+  ctx.fillRect(0, 0, w, h)
+
+  // PHOTO stamp — angled, glowing
+  ctx.save()
+  ctx.translate(w / 2, h * 0.18)
+  ctx.rotate(-0.06)
+  ctx.shadowColor = 'rgba(220,38,38,0.8)'
+  ctx.shadowBlur = 16
+  ctx.fillStyle = '#fff'
+  ctx.strokeStyle = '#dc2626'
+  ctx.lineWidth = 2
+  ctx.font = 'bold 38px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillText('PHOTO', 0, 0)
+  ctx.shadowBlur = 0
+  ctx.strokeText('PHOTO', 0, 0)
+  ctx.font = 'bold 11px sans-serif'
+  ctx.fillStyle = '#fbbf24'
+  ctx.fillText('FINISH', 0, 16)
+  ctx.restore()
+
+  // Top + bottom black bars (broadcast-letterbox vibe)
+  ctx.fillStyle = 'rgba(0,0,0,0.85)'
+  ctx.fillRect(0, 0, w, h * 0.05)
+  ctx.fillRect(0, h * 0.95, w, h * 0.05)
+  ctx.restore()
+}
+
 function ordinal(n: number): string {
   const s = ['th', 'st', 'nd', 'rd']
   const v = n % 100
   return n + (s[(v - 20) % 10] ?? s[v] ?? s[0])
+}
+
+// Format race time as M:SS.t (typical race-call chyron format: "1:11.3").
+function formatRaceTime(seconds: number): string {
+  if (seconds <= 0) return '0:00.0'
+  const m = Math.floor(seconds / 60)
+  const s = seconds - m * 60
+  return `${m}:${s.toFixed(1).padStart(4, '0')}`
+}
+
+// Pick the running call line for a given phase. Uses PP numbers, not
+// names — fans at the rail track the field by saddle cloth, not ID.
+function phaseCall(phase: RacePhase, leaderPP: number, secondPP: number, lengths: number): string {
+  const gap = lengths < 0.3 ? 'a head' : lengths < 0.7 ? 'a neck' : lengths < 1.5 ? 'a length' : `${lengths.toFixed(1)} lengths`
+  switch (phase) {
+    case 'tote':    return 'Loading the gate…'
+    case 'gate':    return "And they're off!"
+    case 'early':   return leaderPP ? `#${leaderPP} clears to the lead — ${gap} on #${secondPP}` : 'Off and running'
+    case 'mid':     return leaderPP ? `Down the back — #${leaderPP} sets the pace` : 'Down the back stretch'
+    case 'stretch': return leaderPP ? `Top of the stretch! #${leaderPP} still in front by ${gap}` : 'Into the stretch'
+    case 'finish':  return leaderPP ? `It's #${leaderPP} at the wire!` : 'They hit the wire!'
+  }
 }
 
 // ── Rail-cam side view ─────────────────────────────────────────
@@ -555,7 +745,11 @@ function drawSideView(
   const lanes = horses.length
   const laneSpan = trackH - 22
   const laneStep = laneSpan / Math.max(1, lanes - 1)
-  const baseScale = Math.min(2.8, Math.max(1.6, w / 320))
+  // Push-in: scale ramps up gently as phaseT crosses 0.4 (well before
+  // wire) so by the time leaders hit the line the field reads tighter
+  // and bigger — broadcast operators do this to amplify drama.
+  const pushIn = phaseT < 0.4 ? 1 : 1 + Math.min(0.18, (phaseT - 0.4) * 0.6)
+  const baseScale = Math.min(2.8, Math.max(1.6, w / 320)) * pushIn
   const pxPerLength = Math.max(36, w * 0.06) * (baseScale / 1.6)
 
   type RailHorse = HorseState & { lengthsBehind: number; finishPos: number }
@@ -583,7 +777,6 @@ function drawSideView(
   // Leader X timeline. Leader's nose hits the wire at WIRE_HIT_AT.
   // Leader continues past the wire until phaseT=1 so trailers also
   // cross before the rail-cam unmounts.
-  const WIRE_HIT_AT = 0.55
   const maxLB = Math.max(0, ...railHorses.map(r => r.lengthsBehind))
   const leaderStartX = -baseScale * 50
   const leaderEndX = wireX + (maxLB + 2) * pxPerLength
@@ -630,7 +823,27 @@ function drawSideView(
     }
     ctx.restore()
 
-    drawHorseProfile(ctx, x, y, ho.color, ho.isPlayer, ho.gallop, ho.pp, s)
+    drawHorseProfile(ctx, x, y, ho.silkPrimary, ho.silkSecondary, ho.silkPattern, ho.isPlayer, ho.gallop, ho.pp, s)
+
+    // Dust puff from rear hooves on dirt/synthetic surfaces. Phase-driven
+    // so the puff trails behind the horse as it scrolls past — sells the
+    // weight of the pack and keeps the foreground alive.
+    if (surface !== 'T') {
+      const puffPhase = (ho.gallop + ho.lane * 0.7) % (Math.PI * 2)
+      if (Math.sin(puffPhase) > 0.7) {
+        ctx.save()
+        const puffColor = surface === 'S' ? '180,180,180' : '200,170,135'
+        for (let p = 0; p < 3; p++) {
+          const px = x - (10 + p * 6) * s
+          const py = y + (5 - p * 0.8) * s
+          const pr = (2 + p * 0.7) * s
+          ctx.globalAlpha = 0.35 - p * 0.08
+          ctx.fillStyle = `rgb(${puffColor})`
+          ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill()
+        }
+        ctx.restore()
+      }
+    }
 
     // Finish-position placard above each horse once it has crossed
     // (or is at) the wire. Reinforces the official order visually.
@@ -669,13 +882,22 @@ function drawSideView(
 function drawHorseProfile(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
-  color: string, isPlayer: boolean,
+  silkPrimary: string, silkSecondary: string, pattern: SilkPattern,
+  isPlayer: boolean,
   gallop: number, pp: number, s: number,
 ) {
   ctx.save()
   ctx.translate(x, y)
 
-  const bob = Math.sin(gallop) * 1.3 * s
+  // Body bob: vertical rise/fall of the chest. Head nod runs ahead of
+  // body bob so the head pumps down on each stride landing — a cue real
+  // horseplayers read instinctively.
+  const bob = Math.sin(gallop) * 1.6 * s
+  const headNod = Math.sin(gallop + Math.PI * 0.25) * 2.2 * s
+  // Jockey crouch: rocks the rider forward on stride extension and back
+  // on collection, sells the pumping motion of a real race ride.
+  const crouchX = Math.sin(gallop + Math.PI * 0.5) * 1.3 * s
+  const crouchY = Math.cos(gallop + Math.PI * 0.5) * 0.6 * s
 
   // Tail (behind)
   ctx.strokeStyle = '#2a1a10'
@@ -698,51 +920,59 @@ function drawHorseProfile(
   ctx.ellipse(0, bob, 14 * s, 6 * s, 0, 0, Math.PI * 2)
   ctx.fill()
 
+  // Saddle cloth — PP-color rectangle on the rump, behind the jockey.
+  // Reads as the iconic broadcast identifier of the horse.
+  const pc = ppColor(pp)
+  ctx.save()
+  ctx.fillStyle = pc.bg
+  ctx.beginPath()
+  // Drape the cloth slightly off the rear of the saddle area.
+  ctx.roundRect(-7 * s, -2 * s + bob, 9 * s, 4.5 * s, 1)
+  ctx.fill()
+  ctx.fillStyle = pc.fg
+  ctx.font = `bold ${Math.max(7, 8 * s)}px monospace`
+  ctx.textAlign = 'center'
+  ctx.fillText(String(pp), -2.5 * s, 1.6 * s + bob)
+  ctx.restore()
+
   // Front legs
   profileLeg(ctx, 8 * s, 4 * s + bob, Math.sin(gallop) * 14, s)
   profileLeg(ctx, 11 * s, 4 * s + bob, Math.sin(gallop + Math.PI * 1.5) * 14, s)
 
   // Neck
   ctx.save()
-  ctx.translate(12 * s, -3 * s + bob)
+  ctx.translate(12 * s, -3 * s + bob + headNod * 0.3)
   ctx.rotate(-0.5)
   ctx.fillStyle = '#5c3d2e'
   ctx.beginPath(); ctx.ellipse(0, 0, 7 * s, 3 * s, 0, 0, Math.PI * 2); ctx.fill()
   ctx.restore()
 
-  // Head
+  // Head — pumps with headNod
   ctx.fillStyle = '#5c3d2e'
   ctx.beginPath()
-  ctx.ellipse(18 * s, -7 * s + bob, 4.2 * s, 2.6 * s, -0.4, 0, Math.PI * 2)
+  ctx.ellipse(18 * s, -7 * s + bob + headNod, 4.2 * s, 2.6 * s, -0.4, 0, Math.PI * 2)
   ctx.fill()
   // Ear
   ctx.beginPath()
-  ctx.moveTo(17 * s, -9 * s + bob)
-  ctx.lineTo(18 * s, -11 * s + bob)
-  ctx.lineTo(19 * s, -9 * s + bob)
+  ctx.moveTo(17 * s, -9 * s + bob + headNod)
+  ctx.lineTo(18 * s, -11 * s + bob + headNod)
+  ctx.lineTo(19 * s, -9 * s + bob + headNod)
   ctx.closePath()
   ctx.fill()
   // Eye
   ctx.fillStyle = '#111'
-  ctx.beginPath(); ctx.arc(20 * s, -7.2 * s + bob, 0.8 * s, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.arc(20 * s, -7.2 * s + bob + headNod, 0.8 * s, 0, Math.PI * 2); ctx.fill()
 
-  // Jockey silks
-  ctx.fillStyle = color
-  ctx.beginPath()
-  ctx.ellipse(2 * s, -5 * s + bob, 4.8 * s, 3.6 * s, -0.25, 0, Math.PI * 2)
-  ctx.fill()
-  // Jockey head
+  // Jockey silks with pattern. Crouch translation rocks the upper body.
+  drawSilksProfile(ctx, 2 * s + crouchX, -5 * s + bob + crouchY, 4.8 * s, 3.6 * s, silkPrimary, silkSecondary, pattern)
+  // Jockey head + helmet
   ctx.fillStyle = '#f5deb3'
-  ctx.beginPath(); ctx.arc(5 * s, -9 * s + bob, 2.3 * s, 0, Math.PI * 2); ctx.fill()
-  // Helmet
-  ctx.fillStyle = color
-  ctx.beginPath(); ctx.arc(5 * s, -9.5 * s + bob, 2.5 * s, Math.PI, 0); ctx.fill()
-
-  // PP number on silks
-  ctx.fillStyle = '#fff'
-  ctx.font = `bold ${Math.max(8, 9 * s)}px monospace`
-  ctx.textAlign = 'center'
-  ctx.fillText(String(pp), 2 * s, -3.5 * s + bob)
+  ctx.beginPath(); ctx.arc(5 * s + crouchX, -9 * s + bob + crouchY, 2.3 * s, 0, Math.PI * 2); ctx.fill()
+  ctx.fillStyle = silkPrimary
+  ctx.beginPath(); ctx.arc(5 * s + crouchX, -9.5 * s + bob + crouchY, 2.5 * s, Math.PI, 0); ctx.fill()
+  // Goggles
+  ctx.fillStyle = '#222'
+  ctx.fillRect(4.5 * s + crouchX, -8.5 * s + crouchY + bob, 1.8 * s, 0.6 * s)
 
   // Player ring
   if (isPlayer) {
@@ -753,6 +983,50 @@ function drawHorseProfile(
     ctx.stroke()
   }
 
+  ctx.restore()
+}
+
+function drawSilksProfile(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number, rx: number, ry: number,
+  primary: string, secondary: string, pattern: SilkPattern,
+) {
+  ctx.save()
+  ctx.beginPath()
+  ctx.ellipse(cx, cy, rx, ry, -0.25, 0, Math.PI * 2)
+  ctx.clip()
+  ctx.fillStyle = primary
+  ctx.fillRect(cx - rx * 1.5, cy - ry * 1.5, rx * 3, ry * 3)
+  ctx.fillStyle = secondary
+  switch (pattern) {
+    case 'solid':
+      break
+    case 'sash':
+      ctx.beginPath()
+      ctx.moveTo(cx - rx * 1.5, cy + ry * 0.2)
+      ctx.lineTo(cx - rx * 1.5, cy + ry * 0.7)
+      ctx.lineTo(cx + rx * 1.5, cy - ry * 0.7)
+      ctx.lineTo(cx + rx * 1.5, cy - ry * 0.2)
+      ctx.closePath(); ctx.fill()
+      break
+    case 'stripes':
+      for (let i = -2; i <= 2; i += 2) {
+        ctx.fillRect(cx - rx * 1.5, cy + i * ry * 0.32, rx * 3, ry * 0.32)
+      }
+      break
+    case 'quartered':
+      ctx.fillRect(cx - rx * 1.5, cy - ry * 1.5, rx * 1.5, ry * 1.5)
+      ctx.fillRect(cx, cy, rx * 1.5, ry * 1.5)
+      break
+    case 'diamond':
+      ctx.beginPath()
+      ctx.moveTo(cx, cy - ry * 0.7)
+      ctx.lineTo(cx + rx * 0.7, cy)
+      ctx.lineTo(cx, cy + ry * 0.7)
+      ctx.lineTo(cx - rx * 0.7, cy)
+      ctx.closePath(); ctx.fill()
+      break
+  }
   ctx.restore()
 }
 
@@ -779,6 +1053,24 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
   const prevCamRef = useRef<Cam | null>(null)
   const camTransRef = useRef(1)
   const particlesRef = useRef<Particle[]>([])
+  // Photo-finish freeze frame: when result.photoFinish is true and the
+  // leader's nose first hits the wire (phaseT crosses WIRE_HIT_AT during
+  // finish phase), we freeze rendering for FREEZE_MS, overlay film grain
+  // + a "PHOTO" stamp, then push phaseStartRef forward by FREEZE_MS so
+  // the rest of the rail-cam plays out smoothly afterward.
+  const freezeStartRef = useRef<number | null>(null)
+  const freezeAdjustedRef = useRef(false)
+  // Race-time stopwatch — set once on gate-break and read by the chyron
+  // until results take over. Independent of phaseStartRef which resets
+  // each phase.
+  const gateStartRef = useRef<number | null>(null)
+
+  // Live chyron state — updates a few times per second from horsesRef.
+  // Keeps the chyron broadcast-feeling without re-rendering on every
+  // animation frame.
+  const [chyron, setChyron] = useState<{ time: number; leader: number; gap: string; call: string }>({
+    time: 0, leader: 0, gap: '', call: 'Loading the gate…',
+  })
 
   // Respect prefers-reduced-motion: skip the animated run entirely and
   // advance straight to results after a brief beat. Keeps the game
@@ -797,22 +1089,36 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
 
   // Init
   useEffect(() => {
-    const silks = shuffledSilks(race.id)
-    horsesRef.current = active.map((e, i) => ({
-      id: e.horse.id, name: e.horse.name, pp: e.postPosition,
-      targetT: 0, currentT: 0, lane: i,
-      isPlayer: e.horse.id === playerHorseId,
-      color: silks[i % silks.length]!,
-      style: e.horse.runningStyle,
-      gallop: Math.random() * Math.PI * 2,
-    }))
+    horsesRef.current = active.map((e, i) => {
+      const sk = silksFor(race.id, i)
+      return {
+        id: e.horse.id, name: e.horse.name, pp: e.postPosition,
+        targetT: 0, currentT: 0, lane: i,
+        isPlayer: e.horse.id === playerHorseId,
+        silkPrimary: sk.primary,
+        silkSecondary: sk.secondary,
+        silkPattern: sk.pattern,
+        style: e.horse.runningStyle,
+        gallop: Math.random() * Math.PI * 2,
+      }
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Phase transitions
+  // Latch race-stopwatch start when the gate breaks.
+  useEffect(() => {
+    if (phase === 'gate' && gateStartRef.current === null) {
+      gateStartRef.current = performance.now()
+    }
+  }, [phase])
+
+  // Phase transitions. When the engine flagged a photo finish we hold
+  // the rail-cam an extra FREEZE_MS so the freeze-frame moment doesn't
+  // eat into the post-wire cinema.
   useEffect(() => {
     if (phase === 'finish') {
-      const t = setTimeout(onRaceComplete, PHASE_DURATION.finish)
+      const extra = result?.photoFinish ? FREEZE_MS : 0
+      const t = setTimeout(onRaceComplete, PHASE_DURATION.finish + extra)
       return () => clearTimeout(t)
     }
     const i = PHASES.indexOf(phase)
@@ -842,6 +1148,51 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       case 'finish': setAnnounceLines(["They hit the wire!"]); break
     }
   }, [phase, race, active, market.favoriteId])
+
+  // Chyron tick — re-derives current leader/gap/call a few times per
+  // second from horsesRef. Stays decoupled from the canvas frame loop
+  // so we don't trigger a React re-render on every paint.
+  useEffect(() => {
+    const tick = () => {
+      const horses = horsesRef.current
+      if (horses.length === 0) {
+        setChyron(c => ({ ...c, call: phaseCall(phase, 0, 0, 0) }))
+        return
+      }
+      // Sort by visual progress so leader/second reflect what's on screen
+      // mid-race; once result is in we use the engine's order for finish.
+      const sorted = phase === 'finish' && result
+        ? result.finishOrder
+            .map(fp => horses.find(h => h.id === fp.horseId))
+            .filter((h): h is HorseState => !!h)
+        : [...horses].sort((a, b) => b.currentT - a.currentT)
+      const leader = sorted[0]
+      const second = sorted[1]
+      // Lengths gap. During the race we estimate from currentT delta
+      // (60 lengths ≈ a full lap chunk); during finish we trust the
+      // engine's perf gap.
+      let lengths = 0
+      if (leader && second) {
+        if (phase === 'finish' && result) {
+          const lp = result.finishOrder.find(f => f.horseId === leader.id)?.performance ?? 0
+          const sp = result.finishOrder.find(f => f.horseId === second.id)?.performance ?? 0
+          lengths = Math.max(0, lp - sp)
+        } else {
+          lengths = Math.max(0, (leader.currentT - second.currentT) * 60)
+        }
+      }
+      const elapsed = gateStartRef.current === null ? 0 : Math.max(0, (performance.now() - gateStartRef.current) / 1000)
+      setChyron({
+        time: elapsed,
+        leader: leader?.pp ?? 0,
+        gap: lengths > 0.05 ? `+${lengths.toFixed(1)}L` : '',
+        call: phaseCall(phase, leader?.pp ?? 0, second?.pp ?? 0, lengths),
+      })
+    }
+    tick()
+    const id = setInterval(tick, 280)
+    return () => clearInterval(id)
+  }, [phase, result])
 
   // Canvas resize — use ResizeObserver on the wrapper div so we get
   // actual layout dimensions even on mobile Safari.
@@ -887,8 +1238,34 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       const geo = buildGeo(w, h)
 
       // Phase timing — LINEAR for position (smooth speed), eased only for camera
-      const elapsed = now - phaseStartRef.current
-      const t = Math.min(elapsed / PHASE_DURATION[phase], 1)
+      let elapsed = now - phaseStartRef.current
+      let rawT = Math.min(elapsed / PHASE_DURATION[phase], 1)
+
+      // Photo-finish freeze handling. When the leader hits the wire on
+      // a photo finish, latch a freezeStart timestamp; for FREEZE_MS we
+      // hold rawT at WIRE_HIT_AT so nothing on screen advances. After
+      // the freeze, push phaseStartRef forward so the cinema resumes
+      // from where it paused rather than jumping ahead.
+      let frozen = false
+      if (phase === 'finish' && result?.photoFinish) {
+        if (freezeStartRef.current === null && rawT >= WIRE_HIT_AT) {
+          freezeStartRef.current = now
+        }
+        if (freezeStartRef.current !== null) {
+          const since = now - freezeStartRef.current
+          if (since < FREEZE_MS) {
+            rawT = WIRE_HIT_AT
+            elapsed = WIRE_HIT_AT * PHASE_DURATION[phase]
+            frozen = true
+          } else if (!freezeAdjustedRef.current) {
+            phaseStartRef.current += FREEZE_MS
+            freezeAdjustedRef.current = true
+            elapsed = now - phaseStartRef.current
+            rawT = Math.min(elapsed / PHASE_DURATION[phase], 1)
+          }
+        }
+      }
+      const t = rawT
       const et = easeInOutCubic(t)
       const moving = phase !== 'tote' && phase !== 'finish'
 
@@ -931,7 +1308,24 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       ctx.clearRect(0, 0, w, h)
 
       if (mode === 'rail') {
+        // Wire shake: a flash of camera kick within ~140ms after the
+        // leader crosses the wire. Suppressed during freeze (the camera
+        // should be rock-still while the photo-finish is held).
+        const sinceHit = t - WIRE_HIT_AT
+        const shaking = !frozen && sinceHit > 0 && sinceHit < 0.05
+        ctx.save()
+        if (shaking) {
+          const decay = 1 - sinceHit / 0.05
+          const sx = (Math.random() - 0.5) * 4 * decay
+          const sy = (Math.random() - 0.5) * 4 * decay
+          ctx.translate(sx, sy)
+        }
         drawSideView(ctx, w, h, horses, race.conditions.surface, now, result, t)
+        ctx.restore()
+
+        if (frozen) {
+          drawPhotoFinishOverlay(ctx, w, h, now)
+        }
       } else {
         let target: Cam
         switch (mode) {
@@ -958,10 +1352,10 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         for (const ho of sorted) {
           const lo = -geo.tw / 2 + (ho.lane + 1) * laneW
           const pt = trackPoint(ho.currentT % 1, geo, lo)
-          drawHorse(ctx, pt.x, pt.y, pt.angle + Math.PI / 2, ho.color, ho.isPlayer, ho.gallop, ho.pp, moving, hScale)
+          drawHorse(ctx, pt.x, pt.y, pt.angle + Math.PI / 2, ho.silkPrimary, ho.silkSecondary, ho.silkPattern, ho.isPlayer, ho.gallop, ho.pp, moving, hScale)
         }
 
-        drawLabels(ctx, sorted, geo, laneW, Math.max(0.4, 0.7 / cam.s))
+        drawCloths(ctx, sorted, geo, laneW, Math.max(0.4, 0.7 / cam.s))
       }
       ctx.restore()
 
@@ -1000,6 +1394,29 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
           assistive tech since the canvas itself is unreadable. */}
       <div ref={wrapperRef} className="flex-1 min-h-0 relative">
         <canvas ref={canvasRef} className="absolute inset-0" aria-hidden />
+
+        {/* Race-call chyron — broadcast-style top bar with race time,
+            current leader by saddle cloth, and a phase-appropriate call.
+            Sits over the canvas so it tracks the cinema visually. */}
+        <div className="pointer-events-none absolute inset-x-0 top-0 px-3 py-2 bg-gradient-to-b from-black/85 via-black/55 to-transparent text-white flex items-center gap-3 font-mono text-[11px]" aria-hidden>
+          <span className="tabular-nums text-amber-300">{formatRaceTime(chyron.time)}</span>
+          {chyron.leader > 0 && (
+            <span
+              className="rounded-sm px-1.5 py-0.5 font-bold text-[10px]"
+              style={{
+                backgroundColor: ppColor(chyron.leader).bg,
+                color: ppColor(chyron.leader).fg,
+              }}
+            >
+              {chyron.leader}
+            </span>
+          )}
+          {chyron.gap && (
+            <span className="text-stone-300 tabular-nums">{chyron.gap}</span>
+          )}
+          <span className="ml-auto truncate max-w-[60%] text-right text-stone-100">{chyron.call}</span>
+        </div>
+
         <div role="status" aria-live="polite" className="sr-only">
           {phaseLabel(phase)}: {announceLines[announceLines.length - 1] ?? ''}
         </div>
