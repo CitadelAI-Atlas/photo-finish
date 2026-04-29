@@ -107,20 +107,29 @@ export function useGameFlow() {
     store.placeBet(totalWager)
     store.recordBetPlaced()
 
+    // Resolve the race up front so RaceView's photo-finish can render
+    // horses in the correct order with margins drawn from the engine.
+    // Before this, the rail-cam ordered horses by visual progress, which
+    // could disagree with the actual result the player saw on the
+    // results screen. The RNG is only consumed once — resolveCurrentRace
+    // reuses this stored result instead of executing again.
+    const { currentRace } = state
+    const result = currentRace ? executeRace(rngRef.current, currentRace) : null
+
     setState(prev => ({
       ...prev,
       screen: 'raceView',
       playerBets: bets,
       playerHorseId,
+      result,
     }))
-  }, [store])
+  }, [store, state])
 
   const resolveCurrentRace = useCallback(() => {
-    const { currentRace, market, playerBets, playerHorseId, card } = state
+    const { currentRace, market, playerBets, playerHorseId, card, result: precomputed } = state
     if (!currentRace || !market || !card) return
 
-    const rng = rngRef.current
-    const result = executeRace(rng, currentRace)
+    const result = precomputed ?? executeRace(rngRef.current, currentRace)
 
     // Scratch-aware resolution: any bet whose selections include a
     // horse that was scratched after the ticket was written is refunded

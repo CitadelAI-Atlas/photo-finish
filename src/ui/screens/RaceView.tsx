@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import type { Race, MarketSnapshot } from '@/engine/types'
+import type { Race, MarketSnapshot, RaceResult } from '@/engine/types'
 import { Announcer } from '@/ui/components/Announcer'
 import {
   type Particle,
@@ -23,14 +23,19 @@ interface RaceViewProps {
   market: MarketSnapshot
   mtpSnapshots: MarketSnapshot[]
   playerHorseId: string | null
+  result: RaceResult | null
   onRaceComplete: () => void
 }
 
-type CameraMode = 'start' | 'wide' | 'finish' | 'rail'
+type CameraMode = 'start' | 'wide' | 'rail'
+// Camera mapping. The 'stretch' phase covers t≈0.55→0.85 of the oval —
+// horses are still on the back stretch / bottom turn, far from the
+// finish wire. We previously locked the camera to the wire here, which
+// left the field off-screen for several seconds. Wide cam keeps the
+// whole oval visible until we transition into the rail-cam photo finish.
 function cameraForPhase(p: RacePhase): CameraMode {
   if (p === 'tote' || p === 'gate' || p === 'early') return 'start'
-  if (p === 'mid') return 'wide'
-  if (p === 'stretch') return 'finish'
+  if (p === 'mid' || p === 'stretch') return 'wide'
   return 'rail'
 }
 
@@ -324,23 +329,6 @@ function camWide(w: number, h: number, geo: TrackGeo): Cam {
   }
 }
 
-function camFinish(w: number, h: number, geo: TrackGeo, horses: HorseState[]): Cam {
-  // Frame: top of the right straight near the finish line.
-  // Track the leaders approaching the wire.
-  const maxT = horses.length > 0 ? Math.max(...horses.map(h => h.currentT)) : 0.9
-  const focusT = Math.max(0.88, Math.min(maxT + 0.01, 0.998))
-  const focusPt = trackPoint(focusT, geo, 0)
-
-  // Tighter zoom than start — drama!
-  const zoom = w / (geo.tw * 2.2)
-
-  return {
-    tx: w / 2 - focusPt.x * zoom,
-    ty: h / 2 - focusPt.y * zoom,
-    s: zoom,
-  }
-}
-
 function lerpCam(a: Cam, b: Cam, t: number): Cam {
   const e = easeInOutCubic(Math.max(0, Math.min(1, t)))
   return { tx: a.tx + (b.tx - a.tx) * e, ty: a.ty + (b.ty - a.ty) * e, s: a.s + (b.s - a.s) * e }
@@ -434,6 +422,12 @@ function drawGrandstand(ctx: CanvasRenderingContext2D, w: number, h: number) {
   }
 }
 
+function ordinal(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd']
+  const v = n % 100
+  return n + (s[(v - 20) % 10] ?? s[v] ?? s[0])
+}
+
 // ── Rail-cam side view ─────────────────────────────────────────
 // Cinematic broadcast-style view for the finish phase. Horses drawn
 // in profile, mapped left-to-right by gap to the leader. Screen-space
@@ -445,6 +439,8 @@ function drawSideView(
   horses: HorseState[],
   surface: string,
   now: number,
+  result: RaceResult | null,
+  phaseT: number,
 ) {
   drawBackdrop(ctx, w, h, 'rail')
 
@@ -473,11 +469,10 @@ function drawSideView(
   ctx.fillStyle = railShadow
   ctx.fillRect(0, trackTop, w, 14)
 
-  // Scrolling ground stripes — sense of speed. Tied to leader progress
-  // so stripes crawl faster when the field is running.
-  const leaderT = horses.length > 0 ? Math.max(...horses.map(h => h.currentT)) : 0
+  // Scrolling backdrop — phase progress drives stripes/posts so the
+  // world rushes past in time with the leader's pre-computed L→R sweep.
   const stripePeriod = 64
-  const scroll = ((leaderT * 2400) % stripePeriod + stripePeriod) % stripePeriod
+  const scroll = ((phaseT * w * 2.4) % stripePeriod + stripePeriod) % stripePeriod
   ctx.fillStyle = 'rgba(0,0,0,0.09)'
   for (let i = -1; i * stripePeriod < w + stripePeriod; i++) {
     const sx = i * stripePeriod - scroll
@@ -492,29 +487,15 @@ function drawSideView(
 
   // Near-rail posts scroll by at double speed — parallax sense of rush.
   const postPeriod = 110
-  const postScroll = ((leaderT * 4800) % postPeriod + postPeriod) % postPeriod
+  const postScroll = ((phaseT * w * 4.8) % postPeriod + postPeriod) % postPeriod
   ctx.fillStyle = 'rgba(255,255,255,0.9)'
   for (let i = -1; i * postPeriod < w + postPeriod; i++) {
     const sx = i * postPeriod - postScroll
     ctx.fillRect(sx, trackBot - 11, 2, 10)
   }
 
-  // Furlong pole — scrolls toward the wire, fades as it approaches.
-  // Repeats every 0.33 of T so the player sees a pole march past each phase beat.
-  const poleT = ((leaderT * 3) % 1 + 1) % 1
-  const poleX = w - poleT * w * 1.15
-  const poleAlpha = Math.max(0, 1 - Math.abs(poleX - w * 0.82) / (w * 0.6))
-  if (poleX > -20 && poleX < w + 20) {
-    ctx.globalAlpha = poleAlpha
-    ctx.fillStyle = '#fff'
-    ctx.fillRect(poleX, trackTop - 26, 3, 26)
-    ctx.fillStyle = '#16a34a'
-    ctx.fillRect(poleX, trackTop - 26, 3, 7)
-    ctx.globalAlpha = 1
-  }
-
   // ── Finish wire rig ──────────────────────────────────────────
-  const wireX = w * 0.82
+  const wireX = w * 0.78
 
   // Checkered ground strip at the wire
   for (let i = 0; i < trackH; i += 6) {
@@ -565,46 +546,107 @@ function drawSideView(
   ctx.fillRect(wireX - h * 0.18, h * 0.33, h * 0.36, trackBot - h * 0.33)
 
   // ── Horses ───────────────────────────────────────────────────
+  // Photo-finish layout. The engine has already decided the order —
+  // each horse's lengths-behind-leader come from its performance gap
+  // (≈ 1 perf point per length). The leader scrolls from off-screen
+  // left, hits the wire mid-phase, and exits right; trailers ride
+  // pxPerLength behind so their wire-crossing order matches the
+  // official result.
   const lanes = horses.length
-  const laneSpan = trackH - 20
+  const laneSpan = trackH - 22
   const laneStep = laneSpan / Math.max(1, lanes - 1)
-  const tToPx = Math.max(2400, w * 8)
-  const baseScale = Math.min(2.4, Math.max(1.2, w / 380))
+  const baseScale = Math.min(2.8, Math.max(1.6, w / 320))
+  const pxPerLength = Math.max(36, w * 0.06) * (baseScale / 1.6)
 
-  // Outer lanes first so inner lanes overlap on top.
-  const sorted = [...horses].sort((a, b) => b.lane - a.lane)
+  type RailHorse = HorseState & { lengthsBehind: number; finishPos: number }
+  let railHorses: RailHorse[]
+  if (result && result.finishOrder.length > 0) {
+    const leaderPerf = result.finishOrder[0]!.performance
+    railHorses = horses.map(ho => {
+      const fp = result.finishOrder.find(f => f.horseId === ho.id)
+      // Cap the spread so a runaway winner can't push the back of the
+      // field so far left it never appears on screen during the phase.
+      const lb = fp ? Math.min(14, Math.max(0, leaderPerf - fp.performance)) : 0
+      return { ...ho, lengthsBehind: lb, finishPos: fp?.position ?? 99 }
+    })
+  } else {
+    // Fallback: pre-result rendering (shouldn't normally happen — RaceView
+    // now receives the result up front). Use visual currentT as a proxy.
+    const leaderT = Math.max(...horses.map(h => h.currentT), 0)
+    railHorses = horses.map(ho => ({
+      ...ho,
+      lengthsBehind: Math.min(14, (leaderT - ho.currentT) * 60),
+      finishPos: 0,
+    }))
+  }
+
+  // Leader X timeline. Leader's nose hits the wire at WIRE_HIT_AT.
+  // Leader continues past the wire until phaseT=1 so trailers also
+  // cross before the rail-cam unmounts.
+  const WIRE_HIT_AT = 0.55
+  const maxLB = Math.max(0, ...railHorses.map(r => r.lengthsBehind))
+  const leaderStartX = -baseScale * 50
+  const leaderEndX = wireX + (maxLB + 2) * pxPerLength
+  const v = (wireX - leaderStartX) / WIRE_HIT_AT
+  // After the wire-hit, ease the velocity slightly so the trailing
+  // horses don't blur past too quickly. Linear is fine for cinema.
+  const leaderX = phaseT <= WIRE_HIT_AT
+    ? leaderStartX + v * phaseT
+    : wireX + (leaderEndX - wireX) * ((phaseT - WIRE_HIT_AT) / (1 - WIRE_HIT_AT))
+
+  // Draw outermost lanes first so the rail (lane 0) overlaps on top —
+  // matches a broadcast camera looking across the field from the rail.
+  const sorted = [...railHorses].sort((a, b) => b.lane - a.lane)
   for (const ho of sorted) {
-    const gap = leaderT - ho.currentT
-    const x = wireX - gap * tToPx
+    const x = leaderX - ho.lengthsBehind * pxPerLength
     const y = trackBot - 14 - ho.lane * laneStep
-    const s = baseScale * (1 - ho.lane * 0.04)
+    const s = baseScale * (1 - ho.lane * 0.035)
+
+    // Skip horses still well off-screen left to save fillrate.
+    if (x < -baseScale * 60) continue
 
     // Ground shadow — soft, behind horse
     ctx.save()
-    ctx.globalAlpha = 0.38
+    ctx.globalAlpha = 0.4
     ctx.fillStyle = '#000'
     ctx.beginPath()
-    ctx.ellipse(x + 1 * s, y + 6 * s, 15 * s, 3 * s, 0, 0, Math.PI * 2)
+    ctx.ellipse(x + 1 * s, y + 6 * s, 16 * s, 3 * s, 0, 0, Math.PI * 2)
     ctx.fill()
     ctx.restore()
 
     // Speed streaks trailing behind — 3 short lines modulated by gallop.
     ctx.save()
-    ctx.strokeStyle = surface === 'T' ? 'rgba(220,240,220,0.55)' : 'rgba(245,230,200,0.55)'
+    ctx.strokeStyle = surface === 'T' ? 'rgba(220,240,220,0.6)' : 'rgba(245,230,200,0.6)'
     for (let i = 0; i < 3; i++) {
       const yo = (i - 1) * 3 * s
       const wob = Math.abs(Math.sin(ho.gallop + i * 1.3))
-      const len = (14 + wob * 10) * s
-      ctx.globalAlpha = 0.28 - i * 0.07
-      ctx.lineWidth = (1.3 - i * 0.25) * s
+      const len = (16 + wob * 10) * s
+      ctx.globalAlpha = 0.32 - i * 0.08
+      ctx.lineWidth = (1.4 - i * 0.25) * s
       ctx.beginPath()
-      ctx.moveTo(x - 16 * s, y - 1 * s + yo)
-      ctx.lineTo(x - 16 * s - len, y - 1 * s + yo)
+      ctx.moveTo(x - 17 * s, y - 1 * s + yo)
+      ctx.lineTo(x - 17 * s - len, y - 1 * s + yo)
       ctx.stroke()
     }
     ctx.restore()
 
     drawHorseProfile(ctx, x, y, ho.color, ho.isPlayer, ho.gallop, ho.pp, s)
+
+    // Finish-position placard above each horse once it has crossed
+    // (or is at) the wire. Reinforces the official order visually.
+    if (ho.finishPos > 0 && x >= wireX - 4 * s) {
+      const label = ordinal(ho.finishPos)
+      ctx.save()
+      ctx.font = `bold ${Math.max(10, 11 * s)}px sans-serif`
+      ctx.textAlign = 'center'
+      const tw = ctx.measureText(label).width + 8
+      const py = y - 22 * s
+      ctx.fillStyle = ho.finishPos === 1 ? 'rgba(251,191,36,0.95)' : 'rgba(0,0,0,0.7)'
+      ctx.beginPath(); ctx.roundRect(x - tw / 2, py - 8, tw, 14, 3); ctx.fill()
+      ctx.fillStyle = ho.finishPos === 1 ? '#1c1917' : '#fff'
+      ctx.fillText(label, x, py + 3)
+      ctx.restore()
+    }
   }
 
   // Foreground dust haze — subtle warm tint rising from the track near
@@ -726,7 +768,7 @@ function profileLeg(ctx: CanvasRenderingContext2D, lx: number, ly: number, deg: 
 
 // ── Component ──────────────────────────────────────────────────
 
-export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceViewProps) {
+export function RaceView({ race, market, playerHorseId, result, onRaceComplete }: RaceViewProps) {
   const [phase, setPhase] = useState<RacePhase>('tote')
   const [announceLines, setAnnounceLines] = useState<string[]>([])
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -863,7 +905,9 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
         const k = 12
         ho.currentT += (ho.targetT - ho.currentT) * (1 - Math.exp(-k * dt))
 
-        if (moving) ho.gallop += (8 + ho.lane * 0.5) * dt * Math.PI * 2
+        // Keep gallop animating through the rail-cam finish — the horses are
+        // still mid-stride as they cross the wire, not frozen.
+        if (moving || phase === 'finish') ho.gallop += (8 + ho.lane * 0.5) * dt * Math.PI * 2
       }
 
       const mode = cameraForPhase(phase)
@@ -887,13 +931,12 @@ export function RaceView({ race, market, playerHorseId, onRaceComplete }: RaceVi
       ctx.clearRect(0, 0, w, h)
 
       if (mode === 'rail') {
-        drawSideView(ctx, w, h, horses, race.conditions.surface, now)
+        drawSideView(ctx, w, h, horses, race.conditions.surface, now, result, t)
       } else {
         let target: Cam
         switch (mode) {
           case 'start': target = camStart(w, h, geo, horses, phase, et); break
           case 'wide': target = camWide(w, h, geo); break
-          case 'finish': target = camFinish(w, h, geo, horses); break
         }
         camTransRef.current = Math.min(1, camTransRef.current + dt * 1.2)
         const cam = prevCamRef.current && camTransRef.current < 1

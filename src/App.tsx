@@ -66,6 +66,7 @@ function App() {
             market={flow.market}
             mtpSnapshots={flow.mtpSnapshots}
             playerHorseId={flow.playerHorseId}
+            result={flow.result}
             onRaceComplete={flow.resolveCurrentRace}
           />
         )
