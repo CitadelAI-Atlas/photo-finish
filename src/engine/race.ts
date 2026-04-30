@@ -33,7 +33,7 @@ const DEAD_HEAT_THRESHOLD = 0.1
 
 // Photo finish gap: the winner's margin over 2nd, in performance points.
 // At/under this, the result renders as a photo finish in the UI.
-const PHOTO_FINISH_THRESHOLD = 0.5
+const PHOTO_FINISH_THRESHOLD = 1.0
 
 // ── Pace Scenario ──────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import type { Entry, OddsLine } from '@/engine/types'
 import { JOCKEYS } from '@/data/jockeys'
 import { formatOdds } from '@/engine/odds'
+import { ppColor } from '@/ui/utils/postPosition'
 
 interface HorseRowProps {
   entry: Entry
@@ -18,6 +19,7 @@ const STYLE_COLORS = { E: 'text-red-600', P: 'text-blue-600', S: 'text-green-700
 export function HorseRow({ entry, oddsLine, morningLineOdds, isFavorite, isSelected, onSelect, onInspect }: HorseRowProps) {
   const h = entry.horse
   const jockey = JOCKEYS.find(j => j.id === h.jockeyId)
+  const cloth = ppColor(entry.postPosition)
   // Detect if the live odds shifted from the morning line — that's market action
   const drift = oddsLine && morningLineOdds ? oddsLine.odds - morningLineOdds.odds : 0
   const driftDirection: 'down' | 'up' | 'flat' =
@@ -43,14 +45,16 @@ export function HorseRow({ entry, oddsLine, morningLineOdds, isFavorite, isSelec
           : 'border-stone-300 bg-white'
       }`}
     >
-      {/* Post position — tap to select */}
+      {/* Post position — tap to select. Background uses the track-standard
+          saddle-cloth color for this PP so the chip identifies the horse
+          end-to-end (bet selection → race canvas). Selection is shown as
+          a ring rather than a color swap so the cloth stays readable. */}
       <button
         onClick={onSelect}
-        className={`w-8 h-8 shrink-0 flex items-center justify-center rounded-full font-mono font-bold text-sm transition-colors ${
-          isSelected
-            ? 'bg-amber-500 text-white'
-            : 'bg-stone-100 text-stone-500 hover:bg-amber-200 hover:text-amber-800 active:bg-amber-300'
+        className={`w-8 h-8 shrink-0 flex items-center justify-center rounded-full font-mono font-bold text-sm transition-shadow border border-stone-300 ${
+          isSelected ? 'ring-2 ring-amber-500 ring-offset-1' : 'hover:ring-2 hover:ring-amber-300'
         }`}
+        style={{ backgroundColor: cloth.bg, color: cloth.fg }}
         aria-label={`Select ${h.name}`}
       >
         {entry.postPosition}

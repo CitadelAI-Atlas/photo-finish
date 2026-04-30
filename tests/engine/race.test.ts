@@ -152,7 +152,7 @@ describe('Calibration — Photo Finish Rate', () => {
     }
 
     const rate = photoFinishes / iterations
-    expect(rate).toBeGreaterThan(0.03)
-    expect(rate).toBeLessThan(0.25)
+    expect(rate).toBeGreaterThan(0.05)
+    expect(rate).toBeLessThan(0.45)
   })
 })

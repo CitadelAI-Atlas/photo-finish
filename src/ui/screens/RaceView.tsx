@@ -17,6 +17,8 @@ import {
   baseProgress,
   styleOffset,
 } from './raceView/phaseTiming'
+import { ppColor } from '@/ui/utils/postPosition'
+import { ensureSpritesLoaded, getTintedFrames, strideFrameIndex } from './raceView/horseSprite'
 
 interface RaceViewProps {
   race: Race
@@ -44,29 +46,6 @@ const SILK_COLORS = [
   '#0891b2', '#e11d48', '#ea580c', '#4f46e5', '#059669',
   '#d97706', '#7c3aed',
 ]
-
-// Track-standard saddle-cloth colors. Real US thoroughbred racing assigns
-// these by post position so the betting public can identify a horse from
-// the rail by the cloth alone, not by name. Numbers >12 reuse the cycle
-// (real tracks use white-on-color plates for 13+; we approximate).
-const PP_COLORS: { bg: string; fg: string }[] = [
-  { bg: '#dc2626', fg: '#fff' },  // 1 red
-  { bg: '#f5f5f4', fg: '#111' },  // 2 white
-  { bg: '#1d4ed8', fg: '#fff' },  // 3 blue
-  { bg: '#facc15', fg: '#111' },  // 4 yellow
-  { bg: '#15803d', fg: '#fff' },  // 5 green
-  { bg: '#111111', fg: '#fff' },  // 6 black
-  { bg: '#ea580c', fg: '#fff' },  // 7 orange
-  { bg: '#ec4899', fg: '#111' },  // 8 pink
-  { bg: '#0891b2', fg: '#fff' },  // 9 turquoise
-  { bg: '#7c3aed', fg: '#fff' },  // 10 purple
-  { bg: '#78716c', fg: '#fff' },  // 11 gray
-  { bg: '#84cc16', fg: '#111' },  // 12 lime
-]
-
-function ppColor(pp: number): { bg: string; fg: string } {
-  return PP_COLORS[(pp - 1) % PP_COLORS.length]!
-}
 
 type SilkPattern = 'solid' | 'sash' | 'stripes' | 'quartered' | 'diamond'
 const SILK_PATTERNS: SilkPattern[] = ['solid', 'sash', 'stripes', 'quartered', 'diamond']
@@ -536,10 +515,72 @@ function drawGrandstand(ctx: CanvasRenderingContext2D, w: number, h: number) {
 // finish wire. Lifted to module scope so the camera shake at the wire
 // crossing can be triggered from outside drawSideView.
 const WIRE_HIT_AT = 0.55
-// Duration of the photo-finish freeze frame in ms. Long enough to
-// register as a deliberate broadcast beat, short enough that the user
-// doesn't feel the run pausing.
-const FREEZE_MS = 700
+// Duration of the wire-crossing freeze. Pauses the entire race when
+// the leader hits the wire so the player can read the result, then the
+// rail-cam resumes and trailing horses cross in order. Used for both
+// photo finishes (with PHOTO overlay) and decisive finishes (with the
+// OFFICIAL winner flourish).
+const FREEZE_MS = 2000
+
+// Extra wall-clock added to the post-wire portion of the finish phase
+// so trailing horses cross the wire at a broadcast pace instead of
+// blurring through in a single second. Maps onto the (WIRE_HIT_AT, 1]
+// range of phaseT — the leader and trailers all decelerate equally so
+// the back of the field files through one length at a time.
+const POST_WIRE_TRAIL_MS = 2000
+
+// Winner-spotlight flourish drawn over a non-photo (decisive) finish.
+// Quieter than the photo overlay — a golden ring expanding from the
+// wire and an "OFFICIAL — #N" chyron stamp upper-center. Fades out
+// over its lifetime so the rest of the rail-cam plays through.
+function drawWinnerFlourish(
+  ctx: CanvasRenderingContext2D,
+  w: number, h: number,
+  ageMs: number, durationMs: number,
+  winnerPP: number,
+  wireX: number,
+) {
+  const t = Math.max(0, Math.min(1, ageMs / durationMs))
+  const fade = 1 - t
+
+  // Expanding golden ring centered on the wire mid-track.
+  ctx.save()
+  const ringR = 30 + t * Math.max(w, h) * 0.45
+  const ringAlpha = 0.7 * fade
+  ctx.strokeStyle = `rgba(251,191,36,${ringAlpha})`
+  ctx.lineWidth = 4 * fade + 1
+  ctx.beginPath()
+  ctx.arc(wireX, h * 0.85, ringR, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.restore()
+
+  // Inner soft glow pulse
+  ctx.save()
+  const glow = ctx.createRadialGradient(wireX, h * 0.85, 0, wireX, h * 0.85, h * 0.5 * (0.4 + t * 0.6))
+  glow.addColorStop(0, `rgba(251,191,36,${0.35 * fade})`)
+  glow.addColorStop(1, 'rgba(251,191,36,0)')
+  ctx.fillStyle = glow
+  ctx.fillRect(0, 0, w, h)
+  ctx.restore()
+
+  // OFFICIAL — #N stamp upper center
+  const pc = ppColor(winnerPP)
+  ctx.save()
+  ctx.globalAlpha = fade
+  ctx.translate(w / 2, h * 0.18)
+  ctx.font = 'bold 13px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillStyle = '#fbbf24'
+  ctx.fillText('OFFICIAL', 0, 0)
+  // Cloth chip
+  const chipW = 28
+  ctx.fillStyle = pc.bg
+  ctx.beginPath(); ctx.roundRect(-chipW / 2, 6, chipW, 22, 3); ctx.fill()
+  ctx.fillStyle = pc.fg
+  ctx.font = 'bold 16px monospace'
+  ctx.fillText(String(winnerPP), 0, 22)
+  ctx.restore()
+}
 
 // Film-grain + "PHOTO" stamp drawn on top of the frozen rail-cam
 // during a photo finish. now is used to tick the grain noise so the
@@ -750,7 +791,10 @@ function drawSideView(
   // and bigger — broadcast operators do this to amplify drama.
   const pushIn = phaseT < 0.4 ? 1 : 1 + Math.min(0.18, (phaseT - 0.4) * 0.6)
   const baseScale = Math.min(2.8, Math.max(1.6, w / 320)) * pushIn
-  const pxPerLength = Math.max(36, w * 0.06) * (baseScale / 1.6)
+  // Tighter spacing than naive scaling so a 9-length blowout still fits
+  // the field on screen during the freeze. Real broadcasts use a tight
+  // long lens for this reason — length numbers compress visually.
+  const pxPerLength = Math.max(22, w * 0.035) * (baseScale / 1.6)
 
   type RailHorse = HorseState & { lengthsBehind: number; finishPos: number }
   let railHorses: RailHorse[]
@@ -760,7 +804,11 @@ function drawSideView(
       const fp = result.finishOrder.find(f => f.horseId === ho.id)
       // Cap the spread so a runaway winner can't push the back of the
       // field so far left it never appears on screen during the phase.
-      const lb = fp ? Math.min(14, Math.max(0, leaderPerf - fp.performance)) : 0
+      // Cap the on-screen spread so even a runaway winner keeps the
+      // back of the field visible during the freeze. The official
+      // result still records the true gap — this is purely a camera
+      // framing constraint on the rail-cam composition.
+      const lb = fp ? Math.min(9, Math.max(0, leaderPerf - fp.performance)) : 0
       return { ...ho, lengthsBehind: lb, finishPos: fp?.position ?? 99 }
     })
   } else {
@@ -769,7 +817,7 @@ function drawSideView(
     const leaderT = Math.max(...horses.map(h => h.currentT), 0)
     railHorses = horses.map(ho => ({
       ...ho,
-      lengthsBehind: Math.min(14, (leaderT - ho.currentT) * 60),
+      lengthsBehind: Math.min(9, (leaderT - ho.currentT) * 60),
       finishPos: 0,
     }))
   }
@@ -823,7 +871,54 @@ function drawSideView(
     }
     ctx.restore()
 
-    drawHorseProfile(ctx, x, y, ho.silkPrimary, ho.silkSecondary, ho.silkPattern, ho.isPlayer, ho.gallop, ho.pp, s)
+    // Sprite path: pixel-art horse + jockey, with the silk + cap chroma
+    // zones recolored to this horse's silks. Falls back to the vector
+    // drawHorseProfile until images decode (first race might briefly
+    // render vector before sprites pop in).
+    const tinted = getTintedFrames(ho.silkPrimary, ho.silkSecondary)
+    if (tinted) {
+      const frame = tinted[strideFrameIndex(ho.gallop, tinted.length)]!
+      const drawW = 60 * s
+      const drawH = drawW * (frame.height / frame.width)
+      // Anchor: horse feet at y, body roughly centered on x. The source
+      // sprite has feet near the bottom-mid; tune offsets to match the
+      // ground/shadow position drawHorseProfile used.
+      const dx = x - drawW * 0.52
+      const dy = y - drawH * 0.93
+      ctx.imageSmoothingEnabled = false
+      ctx.drawImage(frame, dx, dy, drawW, drawH)
+      ctx.imageSmoothingEnabled = true
+
+      // Saddle-cloth chip pinned over the saddle area so the PP number
+      // remains legible mid-race even though the silk + cap recolor
+      // already identifies the horse.
+      const pc = ppColor(ho.pp)
+      const chipW = 8 * s, chipH = 6 * s
+      const cx = dx + drawW * 0.48, cy = dy + drawH * 0.50
+      ctx.fillStyle = pc.bg
+      ctx.fillRect(cx, cy, chipW, chipH)
+      ctx.fillStyle = pc.fg
+      ctx.font = `bold ${Math.max(7, 5.5 * s)}px monospace`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(String(ho.pp), cx + chipW / 2, cy + chipH / 2)
+      ctx.textBaseline = 'alphabetic'
+
+      // Soft amber halo under the player's horse so they can find it
+      // mid-pack — drawHorseProfile had its own marker; preserve that.
+      if (ho.isPlayer) {
+        ctx.save()
+        ctx.globalAlpha = 0.55
+        const ring = ctx.createRadialGradient(x, y + 4 * s, 1, x, y + 4 * s, 22 * s)
+        ring.addColorStop(0, 'rgba(251,191,36,0.7)')
+        ring.addColorStop(1, 'rgba(251,191,36,0)')
+        ctx.fillStyle = ring
+        ctx.fillRect(x - 24 * s, y - 8 * s, 48 * s, 18 * s)
+        ctx.restore()
+      }
+    } else {
+      drawHorseProfile(ctx, x, y, ho.silkPrimary, ho.silkSecondary, ho.silkPattern, ho.isPlayer, ho.gallop, ho.pp, s)
+    }
 
     // Dust puff from rear hooves on dirt/synthetic surfaces. Phase-driven
     // so the puff trails behind the horse as it scrolls past — sells the
@@ -1087,6 +1182,11 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
 
   const active = race.entries.filter(e => !e.scratched)
 
+  // Kick off sprite image loads ASAP so they're decoded before the
+  // rail-cam phase. If they aren't ready, drawSideView falls back to
+  // the vector-drawn horse profile.
+  useEffect(() => { ensureSpritesLoaded() }, [])
+
   // Init
   useEffect(() => {
     horsesRef.current = active.map((e, i) => {
@@ -1112,13 +1212,12 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
     }
   }, [phase])
 
-  // Phase transitions. When the engine flagged a photo finish we hold
-  // the rail-cam an extra FREEZE_MS so the freeze-frame moment doesn't
-  // eat into the post-wire cinema.
+  // Phase transitions. The finish phase gets two wall-clock extensions:
+  // FREEZE_MS for the wire-crossing pause, and POST_WIRE_TRAIL_MS so
+  // trailers come through at broadcast pace rather than streaking past.
   useEffect(() => {
     if (phase === 'finish') {
-      const extra = result?.photoFinish ? FREEZE_MS : 0
-      const t = setTimeout(onRaceComplete, PHASE_DURATION.finish + extra)
+      const t = setTimeout(onRaceComplete, PHASE_DURATION.finish + FREEZE_MS + POST_WIRE_TRAIL_MS)
       return () => clearTimeout(t)
     }
     const i = PHASES.indexOf(phase)
@@ -1241,13 +1340,15 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       let elapsed = now - phaseStartRef.current
       let rawT = Math.min(elapsed / PHASE_DURATION[phase], 1)
 
-      // Photo-finish freeze handling. When the leader hits the wire on
-      // a photo finish, latch a freezeStart timestamp; for FREEZE_MS we
-      // hold rawT at WIRE_HIT_AT so nothing on screen advances. After
-      // the freeze, push phaseStartRef forward so the cinema resumes
-      // from where it paused rather than jumping ahead.
+      // Wire-crossing freeze. When the leader hits the wire on any
+      // finish — photo or decisive — latch freezeStart and hold rawT at
+      // WIRE_HIT_AT for FREEZE_MS so nothing on screen advances. The
+      // overlay layer renders PHOTO or OFFICIAL during this window.
+      // After the freeze ends we push phaseStartRef forward so the
+      // rail-cam resumes from where it paused rather than jumping
+      // ahead — trailing horses then cross the wire in order.
       let frozen = false
-      if (phase === 'finish' && result?.photoFinish) {
+      if (phase === 'finish' && result) {
         if (freezeStartRef.current === null && rawT >= WIRE_HIT_AT) {
           freezeStartRef.current = now
         }
@@ -1265,16 +1366,52 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
           }
         }
       }
+      // Stretch the post-wire portion of the finish phase. Without this
+      // the trailers' wire-crossing arc fits into ~1.3s and they blur
+      // past the camera. POST_WIRE_TRAIL_MS adds wall-clock to that
+      // window so the back of the field files through at broadcast pace.
+      if (phase === 'finish' && !frozen && rawT > WIRE_HIT_AT) {
+        const wirePhaseWall = WIRE_HIT_AT * PHASE_DURATION.finish
+        const wallSinceWire = elapsed - wirePhaseWall
+        const stretchedWall = (1 - WIRE_HIT_AT) * PHASE_DURATION.finish + POST_WIRE_TRAIL_MS
+        const post = Math.min(1, wallSinceWire / stretchedWall)
+        rawT = WIRE_HIT_AT + (1 - WIRE_HIT_AT) * post
+      }
       const t = rawT
       const et = easeInOutCubic(t)
       const moving = phase !== 'tote' && phase !== 'finish'
 
       // Update horses
       const horses = horsesRef.current
+      // Blend the engine's actual finishing-perf gap into each horse's
+      // target progress so the overhead pack ordering converges toward
+      // the real outcome by stretch. Without this the top-down camera
+      // ordered by running-style profile only — a closer (S) sat at the
+      // back of the pack until the rail cam took over, even when the
+      // engine had them winning. Style offset still drives the early
+      // narrative (E in front, S off the pace); perfOffset takes over
+      // through the stretch.
+      const phaseBlend: Record<RacePhase, number> = {
+        tote: 0, gate: 0, early: 0.15, mid: 0.55, stretch: 1.0, finish: 1.0,
+      }
+      const blend = phaseBlend[phase]
+      const leaderPerf = result?.finishOrder[0]?.performance ?? 0
+
       for (const ho of horses) {
+        let perfOffset = 0
+        if (result && blend > 0) {
+          const fp = result.finishOrder.find(f => f.horseId === ho.id)
+          if (fp) {
+            const lb = Math.min(15, Math.max(0, leaderPerf - fp.performance))
+            // ~0.005 of t per length — visible separation by the
+            // stretch without warping geometry.
+            perfOffset = -lb * 0.005
+          }
+        }
+
         // Position is computed from LINEAR t so speed is constant within each phase
         // and continuous across phase boundaries (baseProgress + styleOffset are designed this way).
-        ho.targetT = Math.min(1, baseProgress(phase, t) + styleOffset(ho.style, phase, t, ho.lane))
+        ho.targetT = Math.min(1, baseProgress(phase, t) + styleOffset(ho.style, phase, t, ho.lane) + perfOffset * blend)
         ho.targetT = Math.max(ho.targetT, ho.currentT) // never backward
 
         // Tight, frame-rate-independent lerp toward target.
@@ -1283,8 +1420,10 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         ho.currentT += (ho.targetT - ho.currentT) * (1 - Math.exp(-k * dt))
 
         // Keep gallop animating through the rail-cam finish — the horses are
-        // still mid-stride as they cross the wire, not frozen.
-        if (moving || phase === 'finish') ho.gallop += (8 + ho.lane * 0.5) * dt * Math.PI * 2
+        // still mid-stride as they cross the wire — but freeze it during
+        // the wire-crossing pause so the broadcast moment reads as a
+        // genuine still frame.
+        if ((moving || phase === 'finish') && !frozen) ho.gallop += (8 + ho.lane * 0.5) * dt * Math.PI * 2
       }
 
       const mode = cameraForPhase(phase)
@@ -1323,8 +1462,21 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         drawSideView(ctx, w, h, horses, race.conditions.surface, now, result, t)
         ctx.restore()
 
-        if (frozen) {
-          drawPhotoFinishOverlay(ctx, w, h, now)
+        // During the wire-crossing freeze, paint the appropriate overlay
+        // on top of the held frame. Photo finishes get the film-grain
+        // PHOTO stamp; decisive finishes get the OFFICIAL flourish in
+        // the winner's cloth color. The flourish age is anchored to the
+        // freeze start so its fade aligns with the freeze window.
+        if (frozen && result && freezeStartRef.current !== null) {
+          if (result.photoFinish) {
+            drawPhotoFinishOverlay(ctx, w, h, now)
+          } else if (result.finishOrder[0]) {
+            const age = now - freezeStartRef.current
+            const winnerId = result.finishOrder[0].horseId
+            const winnerPP = horses.find(ho => ho.id === winnerId)?.pp ?? 0
+            const wireX = w * 0.78
+            drawWinnerFlourish(ctx, w, h, age, FREEZE_MS, winnerPP, wireX)
+          }
         }
       } else {
         let target: Cam
