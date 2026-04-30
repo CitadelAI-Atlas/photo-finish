@@ -37,11 +37,17 @@ const MAX_GEN_ATTEMPTS = 50
 
 // ── PSR distributions by class ─────────────────────────────────
 
+// Class means stay distinct (claimers aren't allowance horses) but the
+// in-class spread tightens: real claiming fields are narrowly graded —
+// the racing secretary writes the conditions so the horses are CLOSE
+// in ability. Wider std (10) produced fields where the best and worst
+// horse were 30+ PSR apart, which renders as 30-length finishes that
+// never look competitive.
 const PSR_PARAMS: Record<RaceClass, { mean: number; std: number; min: number; max: number }> = {
-  MCL: { mean: 48, std: 10, min: 25, max: 70 },
-  CLM: { mean: 62, std: 10, min: 40, max: 85 },
-  ALW: { mean: 76, std: 8,  min: 55, max: 95 },
-  STK: { mean: 90, std: 8,  min: 70, max: 115 },
+  MCL: { mean: 48, std: 5, min: 35, max: 62 },
+  CLM: { mean: 62, std: 5, min: 50, max: 76 },
+  ALW: { mean: 76, std: 5, min: 64, max: 90 },
+  STK: { mean: 90, std: 5, min: 78, max: 105 },
 }
 
 // ── Distribution tables ────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { Race, MarketSnapshot, RaceResult } from '@/engine/types'
+import { perfGapToLengths } from '@/engine/race'
 import { Announcer } from '@/ui/components/Announcer'
 import {
   type Particle,
@@ -522,12 +523,27 @@ const WIRE_HIT_AT = 0.55
 // OFFICIAL winner flourish).
 const FREEZE_MS = 2000
 
-// Extra wall-clock added to the post-wire portion of the finish phase
-// so trailing horses cross the wire at a broadcast pace instead of
-// blurring through in a single second. Maps onto the (WIRE_HIT_AT, 1]
-// range of phaseT — the leader and trailers all decelerate equally so
-// the back of the field files through one length at a time.
-const POST_WIRE_TRAIL_MS = 2000
+// Hard ceiling on the rail-cam's lengths-behind. With the engine's
+// PERF_PER_LENGTH=2.5 scaling, ~95% of CLM finishes have leader-to-last
+// spreads under 23 lengths; 20 catches the vast majority at honest
+// proportions and only blowouts get visually clipped at the back of
+// the field (their finish-position placard still tells the truth).
+const RAILCAM_MAX_LB = 20
+
+// Length math now lives in @/engine/race (perfGapToLengths). Both the
+// summary's margin labels and the rail-cam's pixel positions consult
+// the same conversion, so a horse rendered N lengths behind reads as
+// the cumulative-margin label sum the result card shows above it.
+
+// Wall-clock target per visible length the leader covers post-freeze.
+// Drives the dynamic post-wire window so the back of the field files
+// through at broadcast pace and the camera always waits until the last
+// horse has crossed the wire (plus a short tail) before transitioning.
+const POST_WIRE_MS_PER_LENGTH = 400
+// Floor and ceiling so a tight 1-length finish still feels deliberate
+// and a wide spread doesn't feel interminable.
+const POST_WIRE_MIN_MS = 1500
+const POST_WIRE_MAX_MS = 5000
 
 // Winner-spotlight flourish drawn over a non-photo (decisive) finish.
 // Quieter than the photo overlay — a golden ring expanding from the
@@ -563,22 +579,48 @@ function drawWinnerFlourish(
   ctx.fillRect(0, 0, w, h)
   ctx.restore()
 
-  // OFFICIAL — #N stamp upper center
+  // OFFICIAL — #N stamp upper center. Scaled to the canvas so the
+  // winner moment reads from across the room on mobile and feels as
+  // weighty as the PHOTO stamp on a photo finish. Drop-shadow stack
+  // sells the broadcast lower-third look.
   const pc = ppColor(winnerPP)
+  const titleSize = Math.max(36, Math.min(72, w * 0.11))
+  const chipW = Math.max(72, Math.min(140, w * 0.22))
+  const chipH = chipW * 0.78
+  const ppSize = chipH * 0.78
   ctx.save()
   ctx.globalAlpha = fade
-  ctx.translate(w / 2, h * 0.18)
-  ctx.font = 'bold 13px sans-serif'
+  ctx.translate(w / 2, h * 0.22)
   ctx.textAlign = 'center'
+  ctx.shadowColor = 'rgba(0,0,0,0.85)'
+  ctx.shadowBlur = 18
+  ctx.shadowOffsetY = 3
   ctx.fillStyle = '#fbbf24'
+  ctx.font = `900 ${titleSize}px sans-serif`
   ctx.fillText('OFFICIAL', 0, 0)
-  // Cloth chip
-  const chipW = 28
+  ctx.shadowBlur = 0
+  ctx.shadowOffsetY = 0
+  // Cloth chip — full saddle-cloth color block with the winning PP.
+  const chipY = titleSize * 0.45
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'
+  ctx.shadowBlur = 12
+  ctx.shadowOffsetY = 2
   ctx.fillStyle = pc.bg
-  ctx.beginPath(); ctx.roundRect(-chipW / 2, 6, chipW, 22, 3); ctx.fill()
+  ctx.beginPath(); ctx.roundRect(-chipW / 2, chipY, chipW, chipH, 8); ctx.fill()
+  ctx.shadowBlur = 0
+  ctx.shadowOffsetY = 0
   ctx.fillStyle = pc.fg
-  ctx.font = 'bold 16px monospace'
-  ctx.fillText(String(winnerPP), 0, 22)
+  ctx.font = `900 ${ppSize}px monospace`
+  ctx.textBaseline = 'middle'
+  ctx.fillText(String(winnerPP), 0, chipY + chipH / 2)
+  ctx.textBaseline = 'alphabetic'
+  // "WINNER" tag under the cloth chip
+  const tagSize = Math.max(13, titleSize * 0.32)
+  ctx.font = `bold ${tagSize}px sans-serif`
+  ctx.fillStyle = '#fbbf24'
+  ctx.shadowColor = 'rgba(0,0,0,0.85)'
+  ctx.shadowBlur = 10
+  ctx.fillText('WINNER', 0, chipY + chipH + tagSize + 2)
   ctx.restore()
 }
 
@@ -791,41 +833,44 @@ function drawSideView(
   // and bigger — broadcast operators do this to amplify drama.
   const pushIn = phaseT < 0.4 ? 1 : 1 + Math.min(0.18, (phaseT - 0.4) * 0.6)
   const baseScale = Math.min(2.8, Math.max(1.6, w / 320)) * pushIn
-  // Spacing tuned so length-gaps read clearly (each trailer visibly
-  // back of the next) while still fitting a 9-length spread on screen
-  // during the wire freeze. Pair this with the lb cap below.
-  const pxPerLength = Math.max(28, w * 0.045) * (baseScale / 1.6)
-
   type RailHorse = HorseState & { lengthsBehind: number; finishPos: number }
   let railHorses: RailHorse[]
   if (result && result.finishOrder.length > 0) {
     const leaderPerf = result.finishOrder[0]!.performance
     railHorses = horses.map(ho => {
       const fp = result.finishOrder.find(f => f.horseId === ho.id)
-      // Cap the spread so a runaway winner can't push the back of the
-      // field so far left it never appears on screen during the phase.
-      // Cap the on-screen spread so even a runaway winner keeps the
-      // back of the field visible during the freeze. The official
-      // result still records the true gap — this is purely a camera
-      // framing constraint on the rail-cam composition.
-      const lb = fp ? Math.min(9, Math.max(0, leaderPerf - fp.performance)) : 0
-      return { ...ho, lengthsBehind: lb, finishPos: fp?.position ?? 99 }
+      // Same conversion the summary's margin labels use, so the on-screen
+      // distance behind the leader matches the labels the result card
+      // shows above each horse.
+      const raw = fp ? perfGapToLengths(leaderPerf - fp.performance) : 0
+      return { ...ho, lengthsBehind: Math.min(RAILCAM_MAX_LB, raw), finishPos: fp?.position ?? 99 }
     })
   } else {
-    // Fallback: pre-result rendering (shouldn't normally happen — RaceView
-    // now receives the result up front). Use visual currentT as a proxy.
     const leaderT = Math.max(...horses.map(h => h.currentT), 0)
     railHorses = horses.map(ho => ({
       ...ho,
-      lengthsBehind: Math.min(9, (leaderT - ho.currentT) * 60),
+      lengthsBehind: Math.min(RAILCAM_MAX_LB, (leaderT - ho.currentT) * 60),
       finishPos: 0,
     }))
   }
 
+  // Per-length pixel spacing. Sized to the actual field spread, not the
+  // worst-case cap, so a typical 4–6 length finish renders with full
+  // breathing room (~50–60 px/length) and only blowouts shrink to fit.
+  // Lower bound keeps a 1L gap visually larger than a head/neck so the
+  // summary's margin labels read truthfully on the rail-cam.
+  const maxLB = Math.max(0, ...railHorses.map(r => r.lengthsBehind))
+  // Available rail before the wire (we want the back of the field to sit
+  // near the left edge when the leader is hitting the wire).
+  const railSpan = wireX - 30
+  const idealPxPerLength = railSpan / Math.max(1, maxLB + 1)
+  const pxPerLengthMin = Math.max(36, w * 0.07) * (baseScale / 1.6)
+  const pxPerLengthMax = Math.max(64, w * 0.12) * (baseScale / 1.6)
+  const pxPerLength = Math.min(pxPerLengthMax, Math.max(pxPerLengthMin, idealPxPerLength))
+
   // Leader X timeline. Leader's nose hits the wire at WIRE_HIT_AT.
   // Leader continues past the wire until phaseT=1 so trailers also
   // cross before the rail-cam unmounts.
-  const maxLB = Math.max(0, ...railHorses.map(r => r.lengthsBehind))
   const leaderStartX = -baseScale * 50
   const leaderEndX = wireX + (maxLB + 2) * pxPerLength
   const v = (wireX - leaderStartX) / WIRE_HIT_AT
@@ -1155,6 +1200,10 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
   // the rest of the rail-cam plays out smoothly afterward.
   const freezeStartRef = useRef<number | null>(null)
   const freezeAdjustedRef = useRef(false)
+  // Dynamic post-wire trail wall-time, computed once at finish-phase
+  // start from the actual maxLB so the camera waits exactly long enough
+  // for the back of the field to cross the wire, no more, no less.
+  const postTrailMsRef = useRef(2000)
   // Race-time stopwatch — set once on gate-break and read by the chyron
   // until results take over. Independent of phaseStartRef which resets
   // each phase.
@@ -1213,11 +1262,29 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
   }, [phase])
 
   // Phase transitions. The finish phase gets two wall-clock extensions:
-  // FREEZE_MS for the wire-crossing pause, and POST_WIRE_TRAIL_MS so
-  // trailers come through at broadcast pace rather than streaking past.
+  // FREEZE_MS for the wire-crossing pause, and a dynamic post-wire
+  // trail (computed from the actual maxLB) so the camera holds until
+  // the back of the field has crossed at broadcast pace.
   useEffect(() => {
     if (phase === 'finish') {
-      const t = setTimeout(onRaceComplete, PHASE_DURATION.finish + FREEZE_MS + POST_WIRE_TRAIL_MS)
+      // Compute the visual maxLB the rail-cam will use and size the
+      // post-wire window so the leader covers (maxLB + 2) lengths at
+      // POST_WIRE_MS_PER_LENGTH each. Subtract the post-wire portion
+      // PHASE_DURATION.finish already provides; the remainder is the
+      // extra trail we add on top.
+      let maxLB = 0
+      if (result && result.finishOrder.length > 0) {
+        const leaderPerf = result.finishOrder[0]!.performance
+        for (const fp of result.finishOrder) {
+          const lb = Math.min(RAILCAM_MAX_LB, perfGapToLengths(leaderPerf - fp.performance))
+          if (lb > maxLB) maxLB = lb
+        }
+      }
+      const targetWall = (maxLB + 2) * POST_WIRE_MS_PER_LENGTH
+      const basePostWall = (1 - WIRE_HIT_AT) * PHASE_DURATION.finish
+      const trail = Math.max(POST_WIRE_MIN_MS, Math.min(POST_WIRE_MAX_MS, targetWall - basePostWall))
+      postTrailMsRef.current = trail
+      const t = setTimeout(onRaceComplete, PHASE_DURATION.finish + FREEZE_MS + trail)
       return () => clearTimeout(t)
     }
     const i = PHASES.indexOf(phase)
@@ -1368,12 +1435,13 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       }
       // Stretch the post-wire portion of the finish phase. Without this
       // the trailers' wire-crossing arc fits into ~1.3s and they blur
-      // past the camera. POST_WIRE_TRAIL_MS adds wall-clock to that
-      // window so the back of the field files through at broadcast pace.
+      // past the camera. The trail length is dynamic — sized at finish-
+      // phase start so the back of the field files through at a fixed
+      // ms-per-length pace regardless of how spread out they are.
       if (phase === 'finish' && !frozen && rawT > WIRE_HIT_AT) {
         const wirePhaseWall = WIRE_HIT_AT * PHASE_DURATION.finish
         const wallSinceWire = elapsed - wirePhaseWall
-        const stretchedWall = (1 - WIRE_HIT_AT) * PHASE_DURATION.finish + POST_WIRE_TRAIL_MS
+        const stretchedWall = (1 - WIRE_HIT_AT) * PHASE_DURATION.finish + postTrailMsRef.current
         const post = Math.min(1, wallSinceWire / stretchedWall)
         rawT = WIRE_HIT_AT + (1 - WIRE_HIT_AT) * post
       }
@@ -1391,11 +1459,24 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       // engine had them winning. Style offset still drives the early
       // narrative (E in front, S off the pace); perfOffset takes over
       // through the stretch.
+      // Perf-blend ramps faster than before so the overhead pack ordering
+      // tracks the engine's actual outcome through the back stretch and
+      // far turn — the running-style profile only dominates out of the
+      // gate. Real broadcasts already show clear separation by the half.
       const phaseBlend: Record<RacePhase, number> = {
-        tote: 0, gate: 0, early: 0.15, mid: 0.55, stretch: 1.0, finish: 1.0,
+        tote: 0, gate: 0, early: 0.35, mid: 0.80, stretch: 1.0, finish: 1.0,
       }
       const blend = phaseBlend[phase]
       const leaderPerf = result?.finishOrder[0]?.performance ?? 0
+
+      // Style offset fades inversely with the perf blend. Early in the
+      // race the running-style profile drives ordering (E in front, S
+      // off the pace) since perf hasn't expressed yet; by the stretch,
+      // perf takes over completely and the visual ordering converges to
+      // the engine's truth. Without this fade, a closer-style runner's
+      // late style bonus could visually beat the engine's actual winner
+      // at the wire — the overhead would lie about the race outcome.
+      const styleScale = 1 - blend
 
       for (const ho of horses) {
         let perfOffset = 0
@@ -1403,15 +1484,15 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
           const fp = result.finishOrder.find(f => f.horseId === ho.id)
           if (fp) {
             const lb = Math.min(15, Math.max(0, leaderPerf - fp.performance))
-            // ~0.005 of t per length — visible separation by the
-            // stretch without warping geometry.
             perfOffset = -lb * 0.005
           }
         }
 
-        // Position is computed from LINEAR t so speed is constant within each phase
-        // and continuous across phase boundaries (baseProgress + styleOffset are designed this way).
-        ho.targetT = Math.min(1, baseProgress(phase, t) + styleOffset(ho.style, phase, t, ho.lane) + perfOffset * blend)
+        ho.targetT = Math.min(1,
+          baseProgress(phase, t)
+          + styleOffset(ho.style, phase, t, ho.lane) * styleScale
+          + perfOffset * blend
+        )
         ho.targetT = Math.max(ho.targetT, ho.currentT) // never backward
 
         // Tight, frame-rate-independent lerp toward target.

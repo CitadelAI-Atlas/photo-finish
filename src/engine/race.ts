@@ -23,8 +23,50 @@ const POST_POSITION_PENALTY_MAX = -2
 const JOCKEY_RACE_VARIANCE = 2
 
 // Performance noise — sigma of the normal distribution applied to every
-// horse's final number. ~12 PSR points gives real upsets without chaos.
-const PERFORMANCE_VARIANCE_SIGMA = 12
+// horse's final number. Sized in concert with trouble events (below):
+// Gaussian variance models day-level fitness wobble, trouble models
+// discrete trip incidents. Together they pull the favorite-win rate
+// toward the real-world ~33% target without distorting margins.
+const PERFORMANCE_VARIANCE_SIGMA = 10
+
+// ── Trouble events ─────────────────────────────────────────────
+// Real-world racing upsets come from discrete bad luck — bumped at
+// the gate, checked in traffic, lost path through the turn — not from
+// symmetric Gaussian noise. Without a trouble mechanic, the chalk wins
+// too often (audit: 45% vs real ~33%) because the favorite has no way
+// to BLOW the race short of a 2-sigma negative variance roll.
+//
+// Trouble fires per-horse independently and only ever subtracts. Three
+// severity tiers loosely mirror chart-call language: minor (had to
+// take up briefly), moderate (steadied/checked), major (bumped hard,
+// lost rider's whip, badly hampered). Tuned alongside the Gaussian
+// variance so total field spread stays inside the realistic band.
+const TROUBLE_RATE = 0.25
+const TROUBLE_MINOR_P = 0.55
+const TROUBLE_MODERATE_P = 0.30
+// Remainder (15%) is major.
+const TROUBLE_MINOR_MIN = 4
+const TROUBLE_MINOR_MAX = 9
+const TROUBLE_MODERATE_MIN = 10
+const TROUBLE_MODERATE_MAX = 18
+const TROUBLE_MAJOR_MIN = 19
+const TROUBLE_MAJOR_MAX = 30
+
+// Perf-points per length. Engine performance is computed in PSR-like
+// units (scale 0–110ish); margins between horses get reported in
+// lengths. Real broadcasts stretch ½ second of running time across
+// ~3 lengths, and our engine variance is sized to that scale. Without
+// the divisor, a 30-point perf gap rendered as "29 lengths" — wider
+// than the screen and unrealistic for any real claiming race. Using
+// 2.5 perf-points per length keeps the visual spread inside the cap
+// and the labels honest. This is the SINGLE knob that ties summary
+// margin labels to rail-cam pixels — both consult performanceGapToMargin
+// and perfGapToLengths via this constant.
+const PERF_PER_LENGTH = 2.5
+
+export function perfGapToLengths(gap: number): number {
+  return Math.max(0, gap) / PERF_PER_LENGTH
+}
 
 // Dead-heat threshold: if two (or more) horses finish within this many
 // performance points of the cluster leader, they share the position.
@@ -33,6 +75,7 @@ const DEAD_HEAT_THRESHOLD = 0.1
 
 // Photo finish gap: the winner's margin over 2nd, in performance points.
 // At/under this, the result renders as a photo finish in the UI.
+// Sized so a photo only triggers in nose/head territory (≤0.4 lengths).
 const PHOTO_FINISH_THRESHOLD = 1.0
 
 // ── Pace Scenario ──────────────────────────────────────────────
@@ -65,6 +108,20 @@ function paceAdjustment(style: string, scenario: PaceScenario): number {
 function postPositionPenalty(pp: number, fieldSize: number): number {
   if (fieldSize <= 1) return 0
   return POST_POSITION_PENALTY_MAX * ((pp - 1) / (fieldSize - 1))
+}
+
+function rollTrouble(rng: Rng): number {
+  if (rng.next() >= TROUBLE_RATE) return 0
+  const tier = rng.next()
+  let lo: number, hi: number
+  if (tier < TROUBLE_MINOR_P) {
+    lo = TROUBLE_MINOR_MIN; hi = TROUBLE_MINOR_MAX
+  } else if (tier < TROUBLE_MINOR_P + TROUBLE_MODERATE_P) {
+    lo = TROUBLE_MODERATE_MIN; hi = TROUBLE_MODERATE_MAX
+  } else {
+    lo = TROUBLE_MAJOR_MIN; hi = TROUBLE_MAJOR_MAX
+  }
+  return -(lo + rng.next() * (hi - lo))
 }
 
 function jockeyRaceBonus(jockeyId: string, rng: Rng): number {
@@ -103,21 +160,24 @@ export function calculatePerformance(
     : 0
 
   const variance = rng.normal(0, PERFORMANCE_VARIANCE_SIGMA)
+  const trouble = rollTrouble(rng)
 
-  return base + pace + surface + distance + jockey + post + quirkAdj + variance
+  return base + pace + surface + distance + jockey + post + quirkAdj + variance + trouble
 }
 
 // ── Margin Labels ──────────────────────────────────────────────
 
 export function performanceGapToMargin(gap: number): MarginLabel {
-  const abs = Math.abs(gap)
-  if (abs <= 0.5) return 'nose'
-  if (abs <= 1.0) return 'head'
-  if (abs <= 1.5) return 'neck'
-  if (abs <= 2.5) return '½ length'
-  if (abs <= 4.0) return `${Math.round(abs - 1)} length${abs > 2.5 ? 's' : ''}`
-  if (abs <= 10) return `${Math.round(abs - 1)} lengths`
-  return `${Math.round(abs)} lengths`
+  // Convert perf-points → lengths via the single scaling knob, then
+  // bucket. Sub-length labels (nose/head/neck/½) are body-overlap
+  // territory; from 1 length up we round to the nearest length.
+  const lengths = perfGapToLengths(Math.abs(gap))
+  if (lengths <= 0.15) return 'nose'
+  if (lengths <= 0.30) return 'head'
+  if (lengths <= 0.55) return 'neck'
+  if (lengths <= 0.85) return '½ length'
+  if (lengths < 1.5) return '1 length'
+  return `${Math.round(lengths)} lengths`
 }
 
 // ── Execute Race ───────────────────────────────────────────────
