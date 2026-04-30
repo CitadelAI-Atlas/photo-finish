@@ -791,10 +791,10 @@ function drawSideView(
   // and bigger — broadcast operators do this to amplify drama.
   const pushIn = phaseT < 0.4 ? 1 : 1 + Math.min(0.18, (phaseT - 0.4) * 0.6)
   const baseScale = Math.min(2.8, Math.max(1.6, w / 320)) * pushIn
-  // Tighter spacing than naive scaling so a 9-length blowout still fits
-  // the field on screen during the freeze. Real broadcasts use a tight
-  // long lens for this reason — length numbers compress visually.
-  const pxPerLength = Math.max(22, w * 0.035) * (baseScale / 1.6)
+  // Spacing tuned so length-gaps read clearly (each trailer visibly
+  // back of the next) while still fitting a 9-length spread on screen
+  // during the wire freeze. Pair this with the lb cap below.
+  const pxPerLength = Math.max(28, w * 0.045) * (baseScale / 1.6)
 
   type RailHorse = HorseState & { lengthsBehind: number; finishPos: number }
   let railHorses: RailHorse[]
