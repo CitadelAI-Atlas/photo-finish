@@ -384,43 +384,6 @@ function leg(ctx: CanvasRenderingContext2D, lx: number, ly: number, sw: number, 
 
 interface Cam { tx: number; ty: number; s: number }
 
-function camStart(w: number, h: number, geo: TrackGeo, horses: HorseState[], phase: RacePhase, t: number): Cam {
-  // Frame: vertical slice of the right straight, bottom half.
-  // Horses run upward. Camera tracks the pack vertically.
-  // The right straight x-center = cx + rx.  We want that centered horizontally.
-
-  const avgT = horses.length > 0
-    ? horses.reduce((a, b) => a + b.currentT, 0) / horses.length
-    : 0
-  // Focus point on the track
-  const focusT = Math.min(avgT + 0.02, 0.28)
-  const focusPt = trackPoint(focusT, geo, 0)
-
-  // Zoom: scale so the track width band (~tw + padding) fills most of the screen width
-  const zoom = phase === 'gate'
-    ? w / (geo.tw * 2.5)
-    : w / (geo.tw * 3.0) - t * 0.15
-
-  return {
-    tx: w / 2 - focusPt.x * zoom,
-    ty: h / 2 - focusPt.y * zoom,
-    s: zoom,
-  }
-}
-
-function camWide(w: number, h: number, geo: TrackGeo): Cam {
-  // Fit the entire oval into the viewport with padding.
-  // Oval bounding box: width = 2*(rx + tw/2), height = 2*(ry + rx + tw/2)
-  const bw = 2 * (geo.rx + geo.tw / 2) + 10
-  const bh = 2 * (geo.ry + geo.rx + geo.tw / 2) + 10
-  const s = Math.min(w / bw, h / bh)
-
-  return {
-    tx: w / 2 - geo.cx * s,
-    ty: h / 2 - geo.cy * s,
-    s,
-  }
-}
 
 function camPack(w: number, h: number, geo: TrackGeo, horses: HorseState[]): Cam {
   // Track the field centroid at 2.5× wide zoom so overhead sprites read large.
@@ -1496,7 +1459,7 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         rawT = WIRE_HIT_AT + (1 - WIRE_HIT_AT) * post
       }
       const t = rawT
-      const et = easeInOutCubic(t)
+      void easeInOutCubic(t) // kept for future use
       const moving = phase !== 'tote' && phase !== 'finish'
 
       // Update horses
