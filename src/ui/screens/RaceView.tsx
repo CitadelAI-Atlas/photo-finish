@@ -393,7 +393,7 @@ function camPack(w: number, h: number, geo: TrackGeo, horses: HorseState[]): Cam
   const focusPt = trackPoint(avgT % 1, geo, 0)
   const bw = 2 * (geo.rx + geo.tw / 2) + 10
   const bh = 2 * (geo.ry + geo.rx + geo.tw / 2) + 10
-  const s = Math.min(w / bw, h / bh) * 2.5
+  const s = Math.min(w / bw, h / bh) * 3.5
   return {
     tx: w / 2 - focusPt.x * s,
     ty: h / 2 - focusPt.y * s,
@@ -1594,7 +1594,10 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         drawParticles(ctx, particlesRef.current)
 
         const sorted = [...horses].sort((a, b) => a.currentT - b.currentT)
-        const hScale = Math.max(0.5, Math.min(1.4, 1.0 / cam.s * 1.0))
+        // Target ~60px screen height per horse. Numerator = target / 28.
+        // Larger value means bigger horses; cam.s cancels in screen-pixel math
+        // so we deliberately overshoot to break the 1:1 inverse relationship.
+        const hScale = Math.max(0.6, Math.min(2.5, 2.2 / cam.s))
 
         ensureOverheadLoaded()
         for (const ho of sorted) {
