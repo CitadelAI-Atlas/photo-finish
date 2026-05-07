@@ -20,6 +20,18 @@ import {
 } from './raceView/phaseTiming'
 import { ppColor } from '@/ui/utils/postPosition'
 import { ensureSpritesLoaded, getTintedFrames, strideFrameIndex } from './raceView/horseSprite'
+import { ensureOverheadLoaded, getOverheadFrame } from './raceView/overheadSprite'
+const GRANDSTAND_URL = '/_grandcru_Flat_orthographic_illustration_of_a_horse_racing_gran_25fa3c74-9066-45c6-9216-122f8e0afdd8.png'
+
+let grandstandImg: HTMLImageElement | null = null
+let grandstandLoading = false
+function ensureGrandstandLoaded(): void {
+  if (grandstandLoading) return
+  grandstandLoading = true
+  const img = new Image()
+  img.onload = () => { grandstandImg = img }
+  img.src = GRANDSTAND_URL
+}
 
 interface RaceViewProps {
   race: Race
@@ -410,6 +422,22 @@ function camWide(w: number, h: number, geo: TrackGeo): Cam {
   }
 }
 
+function camPack(w: number, h: number, geo: TrackGeo, horses: HorseState[]): Cam {
+  // Track the field centroid at 2.5× wide zoom so overhead sprites read large.
+  const avgT = horses.length > 0
+    ? horses.reduce((a, b) => a + b.currentT, 0) / horses.length
+    : 0
+  const focusPt = trackPoint(avgT % 1, geo, 0)
+  const bw = 2 * (geo.rx + geo.tw / 2) + 10
+  const bh = 2 * (geo.ry + geo.rx + geo.tw / 2) + 10
+  const s = Math.min(w / bw, h / bh) * 2.5
+  return {
+    tx: w / 2 - focusPt.x * s,
+    ty: h / 2 - focusPt.y * s,
+    s,
+  }
+}
+
 function lerpCam(a: Cam, b: Cam, t: number): Cam {
   const e = easeInOutCubic(Math.max(0, Math.min(1, t)))
   return { tx: a.tx + (b.tx - a.tx) * e, ty: a.ty + (b.ty - a.ty) * e, s: a.s + (b.s - a.s) * e }
@@ -431,18 +459,23 @@ function drawCloths(ctx: CanvasRenderingContext2D, horses: HorseState[], geo: Tr
     const pt = trackPoint(horse.currentT % 1, geo, lo)
     const pc = ppColor(horse.pp)
     const sz = fs + 6
-    const ly = pt.y - 14 * invScale
+    // Sprite is 28*hScale world units. Offset by the full sprite length
+    // (2× half-length) so the chip leads clearly past the nose.
+    const hScale = Math.max(0.5, Math.min(1.4, invScale / 0.7))
+    const ahead = 28 * hScale
+    const lx = pt.x + Math.cos(pt.angle) * ahead
+    const ly = pt.y + Math.sin(pt.angle) * ahead
 
     // Chip
     ctx.fillStyle = pc.bg
-    ctx.beginPath(); ctx.roundRect(pt.x - sz / 2, ly - sz / 2, sz, sz, 2); ctx.fill()
+    ctx.beginPath(); ctx.roundRect(lx - sz / 2, ly - sz / 2, sz, sz, 2); ctx.fill()
     if (horse.isPlayer) {
       ctx.strokeStyle = '#fbbf24'
       ctx.lineWidth = Math.max(1, 1.5 * invScale)
-      ctx.beginPath(); ctx.roundRect(pt.x - sz / 2, ly - sz / 2, sz, sz, 2); ctx.stroke()
+      ctx.beginPath(); ctx.roundRect(lx - sz / 2, ly - sz / 2, sz, sz, 2); ctx.stroke()
     }
     ctx.fillStyle = pc.fg
-    ctx.fillText(String(horse.pp), pt.x, ly + fs / 2 - 1)
+    ctx.fillText(String(horse.pp), lx, ly + fs / 2 - 1)
   }
   ctx.restore()
 }
@@ -452,7 +485,7 @@ function drawCloths(ctx: CanvasRenderingContext2D, horses: HorseState[], geo: Tr
 // silhouette for wide/rail modes. Screen-space so it doesn't zoom
 // with the track — gives a parallax-ish sense of depth.
 
-function drawBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number, mode: CameraMode) {
+function drawBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number, mode: CameraMode, now = 0) {
   const sky = ctx.createLinearGradient(0, 0, 0, h)
   sky.addColorStop(0, '#0d1a33')
   sky.addColorStop(0.5, '#2a3a5e')
@@ -472,7 +505,16 @@ function drawBackdrop(ctx: CanvasRenderingContext2D, w: number, h: number, mode:
     ctx.fillRect(sx, sy, sz, sz)
   }
 
-  if (mode === 'wide' || mode === 'rail') {
+  if (mode === 'rail' && grandstandImg) {
+    // Draw grandstand image covering sky + grandstand zone (above track band).
+    // Slow horizontal parallax: image is wider than viewport, scroll at 30% of race time.
+    const destH = h * 0.82
+    const imgAspect = grandstandImg.naturalWidth / grandstandImg.naturalHeight
+    const imgDrawW = Math.max(w, destH * imgAspect)
+    const maxScroll = imgDrawW - w
+    const scrollX = (now * 0.012) % (maxScroll + 1)
+    ctx.drawImage(grandstandImg, -scrollX, 0, imgDrawW, destH)
+  } else if (mode === 'wide' || mode === 'rail') {
     drawGrandstand(ctx, w, h)
   }
 }
@@ -521,7 +563,7 @@ const WIRE_HIT_AT = 0.55
 // rail-cam resumes and trailing horses cross in order. Used for both
 // photo finishes (with PHOTO overlay) and decisive finishes (with the
 // OFFICIAL winner flourish).
-const FREEZE_MS = 2000
+const FREEZE_MS = 3500
 
 // Hard ceiling on the rail-cam's lengths-behind. With the engine's
 // PERF_PER_LENGTH=2.5 scaling, ~95% of CLM finishes have leader-to-last
@@ -557,7 +599,8 @@ function drawWinnerFlourish(
   wireX: number,
 ) {
   const t = Math.max(0, Math.min(1, ageMs / durationMs))
-  const fade = 1 - t
+  // Hold full opacity until 75% of duration, then fast fade out.
+  const fade = t < 0.75 ? 1.0 : 1.0 - (t - 0.75) / 0.25
 
   // Expanding golden ring centered on the wire mid-track.
   ctx.save()
@@ -588,10 +631,16 @@ function drawWinnerFlourish(
   const chipW = Math.max(72, Math.min(140, w * 0.22))
   const chipH = chipW * 0.78
   const ppSize = chipH * 0.78
+  const tagSize = Math.max(13, titleSize * 0.32)
+  const blockH = titleSize + chipH + tagSize + titleSize * 0.45 + tagSize + 8
+  const pillW = Math.max(chipW + 40, w * 0.38)
   ctx.save()
   ctx.globalAlpha = fade
   ctx.translate(w / 2, h * 0.22)
   ctx.textAlign = 'center'
+  // Dark pill behind the whole block so it reads over any background.
+  ctx.fillStyle = 'rgba(0,0,0,0.72)'
+  ctx.beginPath(); ctx.roundRect(-pillW / 2, -titleSize - 10, pillW, blockH + 20, 14); ctx.fill()
   ctx.shadowColor = 'rgba(0,0,0,0.85)'
   ctx.shadowBlur = 18
   ctx.shadowOffsetY = 3
@@ -615,7 +664,6 @@ function drawWinnerFlourish(
   ctx.fillText(String(winnerPP), 0, chipY + chipH / 2)
   ctx.textBaseline = 'alphabetic'
   // "WINNER" tag under the cloth chip
-  const tagSize = Math.max(13, titleSize * 0.32)
   ctx.font = `bold ${tagSize}px sans-serif`
   ctx.fillStyle = '#fbbf24'
   ctx.shadowColor = 'rgba(0,0,0,0.85)'
@@ -714,8 +762,10 @@ function drawSideView(
   now: number,
   result: RaceResult | null,
   phaseT: number,
+  scrollNow: number,
 ) {
-  drawBackdrop(ctx, w, h, 'rail')
+  ensureGrandstandLoaded()
+  drawBackdrop(ctx, w, h, 'rail', scrollNow)
 
   // Bigger track band — gives more foreground for cinematic effect.
   const trackTop = h * 0.78
@@ -923,7 +973,7 @@ function drawSideView(
     const tinted = getTintedFrames(ho.silkPrimary, ho.silkSecondary)
     if (tinted) {
       const frame = tinted[strideFrameIndex(ho.gallop, tinted.length)]!
-      const drawW = 60 * s
+      const drawW = 80 * s
       const drawH = drawW * (frame.height / frame.width)
       // Anchor: horse feet at y, body roughly centered on x. The source
       // sprite has feet near the bottom-mid; tune offsets to match the
@@ -938,12 +988,12 @@ function drawSideView(
       // remains legible mid-race even though the silk + cap recolor
       // already identifies the horse.
       const pc = ppColor(ho.pp)
-      const chipW = 8 * s, chipH = 6 * s
-      const cx = dx + drawW * 0.48, cy = dy + drawH * 0.50
+      const chipW = 14 * s, chipH = 11 * s
+      const cx = dx + drawW + 2 * s, cy = dy + drawH * 0.38
       ctx.fillStyle = pc.bg
       ctx.fillRect(cx, cy, chipW, chipH)
       ctx.fillStyle = pc.fg
-      ctx.font = `bold ${Math.max(7, 5.5 * s)}px monospace`
+      ctx.font = `bold ${Math.max(9, 8 * s)}px monospace`
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
       ctx.fillText(String(ho.pp), cx + chipW / 2, cy + chipH / 2)
@@ -1504,7 +1554,7 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         // still mid-stride as they cross the wire — but freeze it during
         // the wire-crossing pause so the broadcast moment reads as a
         // genuine still frame.
-        if ((moving || phase === 'finish') && !frozen) ho.gallop += (8 + ho.lane * 0.5) * dt * Math.PI * 2
+        if ((moving || phase === 'finish') && !frozen) ho.gallop += (5 + ho.lane * 0.3) * dt * Math.PI * 2
       }
 
       const mode = cameraForPhase(phase)
@@ -1540,7 +1590,8 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
           const sy = (Math.random() - 0.5) * 4 * decay
           ctx.translate(sx, sy)
         }
-        drawSideView(ctx, w, h, horses, race.conditions.surface, now, result, t)
+        const scrollNow = frozen && freezeStartRef.current !== null ? freezeStartRef.current : now
+        drawSideView(ctx, w, h, horses, race.conditions.surface, now, result, t, scrollNow)
         ctx.restore()
 
         // During the wire-crossing freeze, paint the appropriate overlay
@@ -1562,8 +1613,8 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
       } else {
         let target: Cam
         switch (mode) {
-          case 'start': target = camStart(w, h, geo, horses, phase, et); break
-          case 'wide': target = camWide(w, h, geo); break
+          case 'start': target = camPack(w, h, geo, horses); break
+          case 'wide': target = camPack(w, h, geo, horses); break
         }
         camTransRef.current = Math.min(1, camTransRef.current + dt * 1.2)
         const cam = prevCamRef.current && camTransRef.current < 1
@@ -1571,7 +1622,7 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
           : target
         prevCamRef.current = cam
 
-        drawBackdrop(ctx, w, h, mode)
+        drawBackdrop(ctx, w, h, mode, now)
 
         ctx.translate(cam.tx, cam.ty)
         ctx.scale(cam.s, cam.s)
@@ -1582,10 +1633,21 @@ export function RaceView({ race, market, playerHorseId, result, onRaceComplete }
         const sorted = [...horses].sort((a, b) => a.currentT - b.currentT)
         const hScale = Math.max(0.5, Math.min(1.4, 1.0 / cam.s * 1.0))
 
+        ensureOverheadLoaded()
         for (const ho of sorted) {
           const lo = -geo.tw / 2 + (ho.lane + 1) * laneW
           const pt = trackPoint(ho.currentT % 1, geo, lo)
-          drawHorse(ctx, pt.x, pt.y, pt.angle + Math.PI / 2, ho.silkPrimary, ho.silkSecondary, ho.silkPattern, ho.isPlayer, ho.gallop, ho.pp, moving, hScale)
+          const overheadFrame = getOverheadFrame(ho.gallop)
+          if (overheadFrame) {
+            const size = 28 * hScale
+            ctx.save()
+            ctx.translate(pt.x, pt.y)
+            ctx.rotate(pt.angle)
+            ctx.drawImage(overheadFrame, -size / 2, -size / 2, size, size)
+            ctx.restore()
+          } else {
+            drawHorse(ctx, pt.x, pt.y, pt.angle + Math.PI / 2, ho.silkPrimary, ho.silkSecondary, ho.silkPattern, ho.isPlayer, ho.gallop, ho.pp, moving, hScale)
+          }
         }
 
         drawCloths(ctx, sorted, geo, laneW, Math.max(0.4, 0.7 / cam.s))
